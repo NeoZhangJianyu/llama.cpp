@@ -1,22 +1,13 @@
 # llama.cpp for SYCL
 
-[Background](#background)
-
-[OS](#os)
-
-[Intel GPU](#intel-gpu)
-
-[Linux](#linux)
-
-[Windows](#windows)
-
-[Environment Variable](#environment-variable)
-
-[Known Issue](#known-issue)
-
-[Q&A](#q&a)
-
-[Todo](#todo)
+* [Background](#background)
+* [Supported OS](#supported-os)
+* [Intel® GPU Portfolio](#intel-gpu)
+* [Linux](#linux)
+* [Windows](#windows)
+* [Environment Variable](#environment-variable)
+* [Known Issues and Steps to troubleshoot](#known-issues-and-steps-to-troubleshoot)
+* [Todo](#todo)
 
 ## Background
 
@@ -24,129 +15,120 @@ SYCL is a higher-level programming model to improve programming productivity on 
 
 oneAPI is a specification that is open and standards-based, supporting multiple architecture types including but not limited to GPU, CPU, and FPGA. The spec has both direct programming and API-based programming paradigms.
 
-Intel uses the SYCL as direct programming language to support CPU, GPUs and FPGAs.
+Intel® uses the SYCL as direct programming language to support CPU, GPUs and FPGAs.
 
 To avoid to re-invent the wheel, this code refer other code paths in llama.cpp (like OpenBLAS, cuBLAS, CLBlast). We use a open-source tool [SYCLomatic](https://github.com/oneapi-src/SYCLomatic) (Commercial release [Intel® DPC++ Compatibility Tool](https://www.intel.com/content/www/us/en/developer/tools/oneapi/dpc-compatibility-tool.html)) migrate to SYCL.
 
-The llama.cpp for SYCL is used to support Intel GPUs.
+The llama.cpp for SYCL is used to support Intel® GPUs.
 
-For Intel CPU, recommend to use llama.cpp for X86 (Intel MKL building).
+For Intel® CPUs, recommend to use llama.cpp for X86 [Intel® MKL building](https://github.com/ggerganov/llama.cpp#intel-onemkl).
 
-## OS
+## Supported OS
 
 |OS|Status|Verified|
 |-|-|-|
 |Linux|Support|Ubuntu 22.04|
 |Windows|Support|Windows 11|
 
-
 ## Intel GPU
 
 |Intel GPU| Status | Verified Model|
 |-|-|-|
-|Intel Data Center Max Series| Support| Max 1550|
-|Intel Data Center Flex Series| Support| Flex 170|
-|Intel Arc Series| Support| Arc 770, 730M|
+|Intel® Data Center Max Series| Support| Max 1550, 1100|
+|Intel® Data Center Flex Series| Support| Flex 170|
+|Intel® Arc Series| Support| Arc 770, 730M|
 |Intel built-in Arc GPU| Support| built-in Arc GPU in Meteor Lake|
 |Intel iGPU| Support| iGPU in i5-1250P, i7-1165G7|
-
 
 ## Linux
 
 ### Setup Environment
 
-1. Install Intel GPU driver.
+* Install Intel® GPU driver.
+  * You can install the drivers by following the official guide: [Install GPU Drivers](https://dgpu-docs.intel.com/driver/installation.html)
+  
+    * Note: for iGPU, please install the client GPU driver.
+  
+  * Add user to group: video, render.
+  
+    * ```bash
+      sudo usermod -aG render username
+      sudo usermod -aG video username
+      ```
 
-a. Please install Intel GPU driver by official guide: [Install GPU Drivers](https://dgpu-docs.intel.com/driver/installation.html).
+    * Note: re-login to enable it.
 
-Note: for iGPU, please install the client GPU driver.
+  * Test the compute stack.
 
-b. Add user to group: video, render.
+    * ```bash
+      sudo apt install clinfo
+      sudo clinfo -l
+      ```
 
-```
-sudo usermod -aG render username
-sudo usermod -aG video username
-```
+      Output (example):
 
-Note: re-login to enable it.
-
-c. Check
-
-```
-sudo apt install clinfo
-sudo clinfo -l
-```
-
-Output (example):
-
-```
-Platform #0: Intel(R) OpenCL Graphics
- `-- Device #0: Intel(R) Arc(TM) A770 Graphics
-
-
-Platform #0: Intel(R) OpenCL HD Graphics
- `-- Device #0: Intel(R) Iris(R) Xe Graphics [0x9a49]
-```
-
-2. Install Intel® oneAPI Base toolkit.
+      ```bash
+      Platform #0: Intel(R) OpenCL Graphics
+      `-- Device #0: Intel(R) Arc(TM) A770 Graphics
 
 
-a. Please follow the procedure in [Get the Intel® oneAPI Base Toolkit ](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html).
+      Platform #0: Intel(R) OpenCL HD Graphics
+      `-- Device #0: Intel(R) Iris(R) Xe Graphics [0x9a49]
+      ```
 
-Recommend to install to default folder: **/opt/intel/oneapi**.
+* Install Intel® oneAPI Base toolkit.
 
-Following guide use the default folder as example. If you use other folder, please modify the following guide info with your folder.
+  * Please follow the procedure in [Get the Intel® oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html).
 
-b. Check
+    * Recommend to install to default folder: **/opt/intel/oneapi**.
 
-```
-source /opt/intel/oneapi/setvars.sh
+      Following guide use the default folder as example. If you use other folder, please modify the following guide info with your folder.
 
-sycl-ls
-```
+  * Activate oneAPI environment and list the available compute stack.
 
-There should be one or more level-zero devices. Like **[ext_oneapi_level_zero:gpu:0]**.
+    ```bash
+    source /opt/intel/oneapi/setvars.sh
+    sycl-ls
+    ```
 
-Output (example):
-```
-[opencl:acc:0] Intel(R) FPGA Emulation Platform for OpenCL(TM), Intel(R) FPGA Emulation Device OpenCL 1.2  [2023.16.10.0.17_160000]
-[opencl:cpu:1] Intel(R) OpenCL, 13th Gen Intel(R) Core(TM) i7-13700K OpenCL 3.0 (Build 0) [2023.16.10.0.17_160000]
-[opencl:gpu:2] Intel(R) OpenCL Graphics, Intel(R) Arc(TM) A770 Graphics OpenCL 3.0 NEO  [23.30.26918.50]
-[ext_oneapi_level_zero:gpu:0] Intel(R) Level-Zero, Intel(R) Arc(TM) A770 Graphics 1.3 [1.3.26918]
+    There should be one or more level-zero devices. Like **[ext_oneapi_level_zero:gpu:0]**.
 
-```
+    Output (example):
 
-2. Build locally:
+    ```bash
+    [opencl:acc:0] Intel(R) FPGA Emulation Platform for OpenCL(TM), Intel(R) FPGA Emulation Device OpenCL 1.2  [2023.16.10.0.17_160000]
+    [opencl:cpu:1] Intel(R) OpenCL, 13th Gen Intel(R) Core(TM) i7-13700K OpenCL 3.0 (Build 0) [2023.16.10.0.17_160000]
+    [opencl:gpu:2] Intel(R) OpenCL Graphics, Intel(R) Arc(TM) A770 Graphics OpenCL 3.0 NEO  [23.30.26918.50]
+    [ext_oneapi_level_zero:gpu:0] Intel(R) Level-Zero, Intel(R) Arc(TM) A770 Graphics 1.3 [1.3.26918]
+    ```
 
-```
-mkdir -p build
-cd build
-source /opt/intel/oneapi/setvars.sh
+* Build locally step-by-step:
 
-#for FP16
-#cmake .. -DLLAMA_SYCL=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DLLAMA_SYCL_F16=ON # faster for long-prompt inference
+  ```bash
+  mkdir -p build
+  cd build
+  source /opt/intel/oneapi/setvars.sh
 
-#for FP32
-cmake .. -DLLAMA_SYCL=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx
+  #for FP16
+  #cmake .. -DLLAMA_SYCL=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DLLAMA_SYCL_F16=ON # faster for long-prompt inference
 
-#build example/main only
-#cmake --build . --config Release --target main
+  #for FP32
+  cmake .. -DLLAMA_SYCL=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx
 
-#build all binary
-cmake --build . --config Release -v
+  #build example/main only
+  #cmake --build . --config Release --target main
 
-cd ..
-```
+  #build all binary
+  cmake --build . --config Release -v
+  ```
 
-or
+  or
 
-```
-./examples/sycl/build.sh
-```
+  ```bash
+  ./examples/sycl/build.sh
+  ```
 
-Note:
-
-- By default, it will build for all binary files. It will take more time. To reduce the time, we recommend to build for **example/main** only.
+  * Note: By default, it will build for all binary files. It will take more time. To reduce the time, we recommend to build for **example/main** only.
 
 ### Run
 
@@ -154,235 +136,223 @@ Note:
 
 2. Enable oneAPI running environment
 
-```
-source /opt/intel/oneapi/setvars.sh
-```
+    ```bash
+    source /opt/intel/oneapi/setvars.sh
+    ```
 
-3. List device ID
+3. Display list of devices
 
-Run without parameter:
+    Run without parameter:
 
-```
-./build/bin/ls-sycl-device
+    ```bash
+      ./build/bin/ls-sycl-device
+    ```
 
-or
+    or
 
-./build/bin/main
-```
+    ```bash
+    ./build/bin/main
+    ```
 
-Check the ID in startup log, like:
+    Check the ID in startup log, (Example below):
 
-```
-found 4 SYCL devices:
-  Device 0: Intel(R) Arc(TM) A770 Graphics,	compute capability 1.3,
-    max compute_units 512,	max work group size 1024,	max sub group size 32,	global mem size 16225243136
-  Device 1: Intel(R) FPGA Emulation Device,	compute capability 1.2,
-    max compute_units 24,	max work group size 67108864,	max sub group size 64,	global mem size 67065057280
-  Device 2: 13th Gen Intel(R) Core(TM) i7-13700K,	compute capability 3.0,
-    max compute_units 24,	max work group size 8192,	max sub group size 64,	global mem size 67065057280
-  Device 3: Intel(R) Arc(TM) A770 Graphics,	compute capability 3.0,
-    max compute_units 512,	max work group size 1024,	max sub group size 32,	global mem size 16225243136
+    ```bash
+    found 4 SYCL devices:
+      Device 0: Intel(R) Arc(TM) A770 Graphics,	compute capability 1.3,
+        max compute_units 512,	max work group size 1024,	max sub group size 32,	global mem size 16225243136
+      Device 1: Intel(R) FPGA Emulation Device,	compute capability 1.2,
+        max compute_units 24,	max work group size 67108864,	max sub group size 64,	global mem size 67065057280
+      Device 2: 13th Gen Intel(R) Core(TM) i7-13700K,	compute capability 3.0,
+        max compute_units 24,	max work group size 8192,	max sub group size 64,	global mem size 67065057280
+      Device 3: Intel(R) Arc(TM) A770 Graphics,	compute capability 3.0,
+        max compute_units 512,	max work group size 1024,	max sub group size 32,	global mem size 16225243136
+    ```
 
-```
+    |Attribute|Note|
+    |-|-|
+    |compute capability 1.3|Level-zero running time, recommended |
+    |compute capability 3.0|OpenCL running time, slower than level-zero in most cases|
 
-|Attribute|Note|
-|-|-|
-|compute capability 1.3|Level-zero running time, recommended |
-|compute capability 3.0|OpenCL running time, slower than level-zero in most cases|
+4. Set device ID and execute llama.cpp.
 
-4. Set device ID and execute llama.cpp
+    You can set device ID = 0 with **GGML_SYCL_DEVICE=0**
 
-Set device ID = 0 by **GGML_SYCL_DEVICE=0**
+    ```bash
+    GGML_SYCL_DEVICE=0 ./build/bin/main -m models/llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:" -n 400 -e -ngl 33
+    ```
 
-```
-GGML_SYCL_DEVICE=0 ./build/bin/main -m models/llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:" -n 400 -e -ngl 33
-```
-or run by script:
+    or run by script:
 
-```
-./examples/sycl/run-llama2.sh
-```
+    ```bash
+    ./examples/sycl/run_llama2.sh
+    ```
 
-Note:
-
-- By default, mmap is used to read model file. In some cases, it leads to the hang issue. Recommend to use parameter **--no-mmap** to disable mmap() to skip this issue.
-
+    Note: By default, mmap is used to read model file. In some cases, it leads to the hang issue. Recommend to use parameter **--no-mmap** to disable mmap() to skip this issue.
 
 5. Check the device ID in output
 
-Like:
-```
-Using device **0** (Intel(R) Arc(TM) A770 Graphics) as main device
-```
+    Example output:
+
+    ```bash
+    Using device **0** (Intel(R) Arc(TM) A770 Graphics) as main device
+    ```
 
 ## Windows
 
-### Setup Environment
+### Setup Intel® oneAPI Environment (Pre-requisite)
 
-1. Install Intel GPU driver.
+* Install Intel GPU drivers.
 
-Please install Intel GPU driver by official guide: [Install GPU Drivers](https://www.intel.com/content/www/us/en/products/docs/discrete-gpus/arc/software/drivers.html).
+  * You can follow the instructions from official guide: [Install GPU Drivers](https://www.intel.com/content/www/us/en/products/docs/discrete-gpus/arc/software/drivers.html).
 
-2. Install Intel® oneAPI Base toolkit.
+* Install Intel® oneAPI Base toolkit.
+  
+  * Please follow the procedure in [Get the Intel® oneAPI Base Toolkit ](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html).
+  
+  * Recommend to install to default folder: **/opt/intel/oneapi**.
 
-a. Please follow the procedure in [Get the Intel® oneAPI Base Toolkit ](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html).
+  * Following guide uses the default folder as example. If you use other folder, please modify the following guide info with your folder.
 
-Recommend to install to default folder: **/opt/intel/oneapi**.
+* Enable oneAPI running environment:
+  * In Search, input 'oneAPI'.
+  * Search & open "Intel oneAPI command prompt for Intel 64 for Visual Studio 2022"
+  * In CMD (Activate oneAPI Environment):
 
-Following guide uses the default folder as example. If you use other folder, please modify the following guide info with your folder.
+      ```bash
+      "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64
+      ```
 
-b. Enable oneAPI running environment:
+  * Verify the compute stack in oneAPI command line:
 
-- In Search, input 'oneAPI'.
+    ```bash
+    sycl-ls
+    ```
 
-Search & open "Intel oneAPI command prompt for Intel 64 for Visual Studio 2022"
+    There should be one or more level-zero devices. Like **[ext_oneapi_level_zero:gpu:0]**.
 
-- In Run:
+    Output (example):
 
-In CMD:
-```
-"C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64
-```
+    ```bash
+    [opencl:acc:0] Intel(R) FPGA Emulation Platform for OpenCL(TM), Intel(R) FPGA Emulation Device OpenCL 1.2  [2023.16.10.0.17_160000]
+    [opencl:cpu:1] Intel(R) OpenCL, 11th Gen Intel(R) Core(TM) i7-1185G7 @ 3.00GHz OpenCL 3.0 (Build 0) [2023.16.10.0.17_160000]
+    [opencl:gpu:2] Intel(R) OpenCL Graphics, Intel(R) Iris(R) Xe Graphics OpenCL 3.0 NEO  [31.0.101.5186]
+    [ext_oneapi_level_zero:gpu:0] Intel(R) Level-Zero, Intel(R) Iris(R) Xe Graphics 1.3 [1.3.28044]
+    ```
 
-c. Check GPU
+* Install CMake & Make to build the project.
+  * Download & install cmake for windows: https://cmake.org/download/
+  * Download & install make for windows provided by mingw-w64: https://www.mingw-w64.org downloads/
 
-In oneAPI command line:
+### Build Instructions
 
-```
-sycl-ls
-```
+  In oneAPI command line window:
 
-There should be one or more level-zero devices. Like **[ext_oneapi_level_zero:gpu:0]**.
+  ```bash
+  mkdir -p build
+  cd build
+  @call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64 --force
 
-Output (example):
-```
-[opencl:acc:0] Intel(R) FPGA Emulation Platform for OpenCL(TM), Intel(R) FPGA Emulation Device OpenCL 1.2  [2023.16.10.0.17_160000]
-[opencl:cpu:1] Intel(R) OpenCL, 11th Gen Intel(R) Core(TM) i7-1185G7 @ 3.00GHz OpenCL 3.0 (Build 0) [2023.16.10.0.17_160000]
-[opencl:gpu:2] Intel(R) OpenCL Graphics, Intel(R) Iris(R) Xe Graphics OpenCL 3.0 NEO  [31.0.101.5186]
-[ext_oneapi_level_zero:gpu:0] Intel(R) Level-Zero, Intel(R) Iris(R) Xe Graphics 1.3 [1.3.28044]
+  # for FP16 faster for long-prompt inference
+  cmake -G "MinGW Makefiles" ..  -DLLAMA_SYCL=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx  -DCMAKE_BUILD_TYPE=Release -DLLAMA_SYCL_F16=ON
 
-```
+  #for FP32
+  cmake -G "MinGW Makefiles" ..  -DLLAMA_SYCL=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx  -DCMAKE_BUILD_TYPE=Release
 
-3. Install cmake & make
+  #build example/main only
+  make main
 
-a. Download & install cmake for windows: https://cmake.org/download/
+  # build all binary
+  make -j
+  cd ..
+  ```
 
-b. Download & install make for windows provided by mingw-w64: https://www.mingw-w64.org/downloads/
+ or
 
+  ```bash
+  .\examples\sycl\win-build-sycl.bat
+  ```
 
-### Build locally:
+* Note:
 
-In oneAPI command line window:
-
-```
-mkdir -p build
-cd build
-@call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64 --force
-
-::  for FP16
-::  faster for long-prompt inference
-::  cmake -G "MinGW Makefiles" ..  -DLLAMA_SYCL=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx  -DCMAKE_BUILD_TYPE=Release -DLLAMA_SYCL_F16=ON
-
-::  for FP32
-cmake -G "MinGW Makefiles" ..  -DLLAMA_SYCL=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx  -DCMAKE_BUILD_TYPE=Release
-
-
-::  build example/main only
-::  make main
-
-::  build all binary
-make -j
-cd ..
-```
-
-or
-
-```
-.\examples\sycl\win-build-sycl.bat
-```
-
-Note:
-
-- By default, it will build for all binary files. It will take more time. To reduce the time, we recommend to build for **example/main** only.
+    By default, it will build for all binary files. It will take more time. To reduce the time, we recommend to build for **example/main** only.
 
 ### Run
 
-1. Put model file to folder **models**
+* Put model file into folder **models**
 
-2. Enable oneAPI running environment
+* Enable oneAPI environment
+  * In Search, input 'oneAPI'.
+  * Open "Intel oneAPI command prompt for Intel 64 for Visual Studio 2022"
+  * In the Command Line:
+  
+    ```bash
+      "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64
+      ```
+  
+  * Display list of devices
+  
+    Run without parameter:
 
-- In Search, input 'oneAPI'.
+    ```bash
+    build\bin\ls-sycl-device.exe
+    ```
 
-Search & open "Intel oneAPI command prompt for Intel 64 for Visual Studio 2022"
+    or
 
-- In Run:
+    ```bash
+    build\bin\main.exe
+    ```
 
-In CMD:
-```
-"C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64
-```
+  * Check the ID in startup log, like:
 
-3. List device ID
+    ```bash
+    found 4 SYCL devices:
+      Device 0: Intel(R) Arc(TM) A770 Graphics,	compute capability 1.3,
+        max compute_units 512,	max work group size 1024,	max sub group size 32,	global mem size 16225243136
+      Device 1: Intel(R) FPGA Emulation Device,	compute capability 1.2,
+        max compute_units 24,	max work group size 67108864,	max sub group size 64,	global mem size 67065057280
+      Device 2: 13th Gen Intel(R) Core(TM) i7-13700K,	compute capability 3.0,
+        max compute_units 24,	max work group size 8192,	max sub group size 64,	global mem size 67065057280
+      Device 3: Intel(R) Arc(TM) A770 Graphics,	compute capability 3.0,
+        max compute_units 512,	max work group size 1024,	max sub group size 32,	global mem size 16225243136
 
-Run without parameter:
+    ```
 
-```
-build\bin\ls-sycl-device.exe
+    |Attribute|Note|
+    |-|-|
+    |compute capability 1.3|Level-zero running time, recommended |
+    |compute capability 3.0|OpenCL running time, slower than level-zero in most cases|
 
-or
+* Set device ID and execute llama.cpp
 
-build\bin\main.exe
-```
+  You can set device ID = 0 with **set GGML_SYCL_DEVICE=0**
 
-Check the ID in startup log, like:
+  ```bash
+  set GGML_SYCL_DEVICE=0
+  build\bin\main.exe -m models\llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:\nStep 1:" -n 400 -e -ngl 33 -s 0
+  ```
 
-```
-found 4 SYCL devices:
-  Device 0: Intel(R) Arc(TM) A770 Graphics,	compute capability 1.3,
-    max compute_units 512,	max work group size 1024,	max sub group size 32,	global mem size 16225243136
-  Device 1: Intel(R) FPGA Emulation Device,	compute capability 1.2,
-    max compute_units 24,	max work group size 67108864,	max sub group size 64,	global mem size 67065057280
-  Device 2: 13th Gen Intel(R) Core(TM) i7-13700K,	compute capability 3.0,
-    max compute_units 24,	max work group size 8192,	max sub group size 64,	global mem size 67065057280
-  Device 3: Intel(R) Arc(TM) A770 Graphics,	compute capability 3.0,
-    max compute_units 512,	max work group size 1024,	max sub group size 32,	global mem size 16225243136
+  or run by script:
 
-```
+  ```bash
+  .\examples\sycl\win-run-llama2.bat
+  ```
 
-|Attribute|Note|
-|-|-|
-|compute capability 1.3|Level-zero running time, recommended |
-|compute capability 3.0|OpenCL running time, slower than level-zero in most cases|
+  Note:
 
-4. Set device ID and execute llama.cpp
+  By default, mmap is used to read model file. In some cases, it leads to the hang issue. Recommend to use parameter **--no-mmap** to disable mmap() to skip this issue.
 
-Set device ID = 0 by **set GGML_SYCL_DEVICE=0**
+* Check the device ID in output
 
-```
-set GGML_SYCL_DEVICE=0
-build\bin\main.exe -m models\llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:\nStep 1:" -n 400 -e -ngl 33 -s 0
-```
-or run by script:
+    Example output:
 
-```
-.\examples\sycl\win-run-llama2.bat
-```
-
-Note:
-
-- By default, mmap is used to read model file. In some cases, it leads to the hang issue. Recommend to use parameter **--no-mmap** to disable mmap() to skip this issue.
-
-
-5. Check the device ID in output
-
-Like:
-```
-Using device **0** (Intel(R) Arc(TM) A770 Graphics) as main device
-```
+    ```bash
+    Using device **0** (Intel(R) Arc(TM) A770 Graphics) as main device
+    ```
 
 ## Environment Variable
 
-#### Build
+### Build
 
 |Name|Value|Function|
 |-|-|-|
@@ -391,36 +361,31 @@ Using device **0** (Intel(R) Arc(TM) A770 Graphics) as main device
 |CMAKE_C_COMPILER|icx|Use icx compiler for SYCL code path|
 |CMAKE_CXX_COMPILER|icpx (Linux), icx (Windows)|use icpx/icx for SYCL code path|
 
-#### Running
-
+### Running
 
 |Name|Value|Function|
 |-|-|-|
 |GGML_SYCL_DEVICE|0 (default) or 1|Set the device id used. Check the device ids by default running output|
 |GGML_SYCL_DEBUG|0 (default) or 1|Enable log function by macro: GGML_SYCL_DEBUG|
 
-## Known Issue
+## Known Issues and Steps to troubleshoot
 
-- Hang during startup
+* Hang during startup
 
   llama.cpp use mmap as default way to read model file and copy to GPU. In some system, memcpy will be abnormal and block.
 
   Solution: add **--no-mmap** or **--mmap 0**.
 
-## Q&A
-
-- Error:  `error while loading shared libraries: libsycl.so.7: cannot open shared object file: No such file or directory`.
+* Error:  `error while loading shared libraries: libsycl.so.7: cannot open shared object file: No such file or directory`.
 
   Miss to enable oneAPI running environment.
 
   Install oneAPI base toolkit and enable it by: `source /opt/intel/oneapi/setvars.sh`.
 
-- In Windows, no result, not error.
+* In Windows, no result, not error.
 
   Miss to enable oneAPI running environment.
 
 ## Todo
 
-- Support to build in Windows.
-
-- Support multiple cards.
+* Support multiple cards.
