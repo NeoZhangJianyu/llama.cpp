@@ -2883,7 +2883,7 @@ static int g_ggml_sycl_debug=0;
 // #define DEBUG_SYCL_MALLOC
 
 static int g_work_group_size = 0;
-// typedef sycl::half ggml_fp16_t;
+//typedef sycl::half ggml_fp16_t;
 
 #define __SYCL_ARCH__ DPCT_COMPATIBILITY_TEMP
 #define VER_4VEC   610          //todo for hardward optimize.
@@ -3218,8 +3218,7 @@ static_assert(K_QUANTS_PER_ITERATION == 1 || K_QUANTS_PER_ITERATION == 2, "K_QUA
 #define MUL_MAT_SRC1_COL_STRIDE 128
 
 #define MAX_STREAMS 8
-static dpct::queue_ptr g_syclStreams[GGML_SYCL_MAX_DEVICES][MAX_STREAMS] = {
-    {0}};
+static dpct::queue_ptr g_syclStreams[GGML_SYCL_MAX_DEVICES][MAX_STREAMS] = {{0}};
 
 struct ggml_tensor_extra_gpu {
     void * data_device[GGML_SYCL_MAX_DEVICES]; // 1 pointer for each device for split tensors
@@ -3228,26 +3227,69 @@ struct ggml_tensor_extra_gpu {
               [MAX_STREAMS]; // events for synchronizing multiple GPUs
 };
 
-inline dpct::err0 ggml_sycl_set_device(const int device) try {
-    int current_device;
+class sycl_gpu_mgr {
+    public:
+        std::vector<int> gpus;
+        int max_compute_units = 0;
+        int work_group_size = 0;
+        std::string gpus_list="";
 
-    SYCL_CHECK(CHECK_TRY_ERROR(
-        current_device = dpct::dev_mgr::instance().current_device_id()));
+        sycl_gpu_mgr() {
+            detect_sycl_gpu_list_with_max_cu();
+            get_allow_gpus();
+        }
 
-    // GGML_SYCL_DEBUG("ggml_sycl_set_device device=%d, current_device=%d\n", device, current_device);
-    if (device == current_device) {
-        return 0;
-    }
+        void get_allow_gpus() {
+            gpus_list="";
+            for (int i = 0; i < gpus.size(); ++i) {
+                gpus_list += std::to_string(gpus[i]);
+                gpus_list += ",";
+            }
+            if (gpus_list.length() >2 ) {
+                gpus_list.pop_back();
+            }
+        }
 
-    return CHECK_TRY_ERROR(dpct::select_device(device));
-}
-catch (sycl::exception const &exc) {
-  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
-            << ", line:" << __LINE__ << std::endl;
-  crash();
-  std::exit(1);
-}
+        bool is_allowed_gpu(int device_id) {
+            return std::find(gpus.begin(), gpus.end(), device_id) != gpus.end();
+        }
 
+        void detect_sycl_gpu_list_with_max_cu() try {
+            int device_count = dpct::dev_mgr::instance().device_count();
+
+            for(int id=0; id< device_count; id++){
+                sycl::device device = dpct::dev_mgr::instance().get_device(id);
+                if (!device.is_gpu()) continue;
+                dpct::device_info prop;
+                dpct::get_device_info(prop, device);
+                if(max_compute_units < prop.get_max_compute_units()) max_compute_units = prop.get_max_compute_units();
+            }
+
+            for(int id=0;id< device_count;id++){
+                sycl::device device = dpct::dev_mgr::instance().get_device(id);
+                if (!device.is_gpu()) continue;
+                dpct::device_info prop;
+                dpct::get_device_info(prop, device);
+                if(max_compute_units == prop.get_max_compute_units() && prop.get_major_version() == 1 ){
+                    gpus.push_back(id);
+                    work_group_size = prop.get_max_work_group_size();
+                }
+            }
+            return;
+        }
+        catch (sycl::exception const &exc) {
+            std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+                    << ", line:" << __LINE__ << std::endl;
+            std::exit(1);
+        }
+
+        int get_gpu_count() {
+            return gpus.size();
+        }
+
+};
+
+static sycl_gpu_mgr* g_sycl_gpu_mgr=NULL;
 static int g_device_count = -1;
 static int g_all_sycl_device_count = -1;
 static int g_main_device = -1;
@@ -3288,6 +3330,39 @@ static void bad_arch(const sycl::stream &stream_ct1) {
     std::exit(1);
 
     (void) bad_arch; // suppress unused function warning
+}
+
+void check_allow_gpu(const int device_id) {
+     if (!g_sycl_gpu_mgr->is_allowed_gpu(device_id)) {
+        char error_buf[256];
+        snprintf(error_buf, sizeof(error_buf), "error: cannot set device=%d, which is not allowed. Please set GPU ID in: [%s]",
+                device_id, g_sycl_gpu_mgr->gpus_list.c_str());
+
+        fprintf(stderr, "%s\n", error_buf);
+        throw std::invalid_argument(error_buf);
+    }
+}
+
+inline dpct::err0 ggml_sycl_set_device(const int device) try {
+
+    check_allow_gpu(device);
+
+    int current_device;
+    SYCL_CHECK(CHECK_TRY_ERROR(
+        current_device = dpct::dev_mgr::instance().current_device_id()));
+
+    // GGML_SYCL_DEBUG("ggml_sycl_set_device device=%d, current_device=%d\n", device, current_device);
+    if (device == current_device) {
+        return 0;
+    }
+
+    return CHECK_TRY_ERROR(dpct::select_device(device));
+}
+catch (sycl::exception const &exc) {
+  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
+            << ", line:" << __LINE__ << std::endl;
+  crash();
+  std::exit(1);
 }
 
 void log_ggml_var_device(const char*name, float *src, size_t total_elements, bool src_on_device){
@@ -11279,27 +11354,43 @@ bool ggml_sycl_loaded(void) {
     return g_sycl_loaded;
 }
 
-void ggml_backend_sycl_print_sycl_devices(){
-    int device_count = dpct::dev_mgr::instance().device_count();
-    fprintf(stderr, "found %d SYCL devices:\n", device_count);
-    for (int id = 0; id < device_count; ++id) {
-        dpct::device_info prop;
-        SYCL_CHECK(CHECK_TRY_ERROR(dpct::get_device_info(
-            prop, dpct::dev_mgr::instance().get_device(id))));
-        sycl::device cur_device = dpct::dev_mgr::instance().get_device(id);
-        fprintf(stderr, "  Device %d: %s,\tcompute capability %d.%d,\n\tmax compute_units %d,\tmax work group size %d,\tmax sub group size %d,\tglobal mem size %lu\n", id,
-                prop.get_name(), prop.get_major_version(),
-                prop.get_minor_version(),
-                prop.get_max_compute_units(),
-                prop.get_max_work_group_size(),
-                prop.get_max_sub_group_size(),
-                prop.get_global_mem_size()
-                );
-    }
-    // fprintf(stderr, "\n");
+void print_device_detail(int id) {
+    dpct::device_info prop;
+    SYCL_CHECK(CHECK_TRY_ERROR(dpct::get_device_info(
+        prop, dpct::dev_mgr::instance().get_device(id))));
+    sycl::device cur_device = dpct::dev_mgr::instance().get_device(id);
+    std::string version;
+    version += std::to_string(prop.get_major_version());
+    version += ".";
+    version += std::to_string(prop.get_minor_version());
+
+    fprintf(stderr, "|%2d|%45s|%14s    |%13d    |%10d    |%9d    |%15lu|\n", id,
+            prop.get_name(), version.c_str(),
+            prop.get_max_compute_units(),
+            prop.get_max_work_group_size(),
+            prop.get_max_sub_group_size(),
+            prop.get_global_mem_size()
+            );
 }
 
-int get_sycl_env(const char* env_name, int default_val){
+void ggml_backend_sycl_print_sycl_devices() {
+    int device_count = dpct::dev_mgr::instance().device_count();
+    fprintf(stderr, "found %d SYCL devices:\n", device_count);
+    fprintf(stderr, "|ID| Name                                        |compute capability|Max compute units|Max work group|Max sub group|Global mem size|\n");
+    fprintf(stderr, "|--|---------------------------------------------|------------------|-----------------|--------------|-------------|---------------|\n");
+    for (int id = 0; id < device_count; ++id) {
+        print_device_detail(id);
+    }
+}
+
+void print_gpu_device_list() {
+    auto &gpus = g_sycl_gpu_mgr->gpus;
+
+    fprintf(stderr, "default use %d SYCL GPUs: [%s] with Max compute units:%d\n",
+            gpus.size(), g_sycl_gpu_mgr->gpus_list.c_str(), g_sycl_gpu_mgr->max_compute_units);
+}
+
+int get_sycl_env(const char* env_name, int default_val) {
     char * user_device_string = getenv(env_name);
     int user_number = default_val;
 
@@ -11325,11 +11416,13 @@ void ggml_init_sycl() try {
 
     if (!initialized) {
         g_ggml_sycl_debug = get_sycl_env("GGML_SYCL_DEBUG", 0);
+        fprintf(stderr, "%s: GGML_SYCL_DEBUG: %d\n", __func__, g_ggml_sycl_debug);
 
-        printf("GGML_SYCL_DEBUG=%d\n", g_ggml_sycl_debug);
-
-        int user_device_id = get_sycl_env("GGML_SYCL_DEVICE", 0);
-
+#if defined(GGML_SYCL_F16)
+        fprintf(stderr, "%s: GGML_SYCL_F16: yes\n", __func__);
+#else
+        fprintf(stderr, "%s: GGML_SYCL_F16: no\n", __func__);
+#endif
         if (CHECK_TRY_ERROR(g_all_sycl_device_count =
                                  dpct::dev_mgr::instance().device_count()) !=
             0) {
@@ -11338,21 +11431,23 @@ void ggml_init_sycl() try {
             return;
         }
         GGML_ASSERT(g_all_sycl_device_count <= GGML_SYCL_MAX_DEVICES);
+        ggml_backend_sycl_print_sycl_devices();
+
+        if (!g_sycl_gpu_mgr) g_sycl_gpu_mgr = new sycl_gpu_mgr();
+
+        g_device_count = g_sycl_gpu_mgr->get_gpu_count();
+        print_gpu_device_list();
+
         int64_t total_vram = 0;
 
-#if defined(GGML_SYCL_F16)
-        fprintf(stderr, "%s: GGML_SYCL_F16:   yes\n", __func__);
-#else
-        fprintf(stderr, "%s: GGML_SYCL_F16:   no\n", __func__);
-#endif
-
-
+/* NOT REMOVE, keep it for next optimize for XMX.
 #if defined(SYCL_USE_XMX)
         fprintf(stderr, "%s: SYCL_USE_XMX: yes\n", __func__);
 #else
         fprintf(stderr, "%s: SYCL_USE_XMX: no\n", __func__);
 #endif
-        ggml_backend_sycl_print_sycl_devices();
+*/
+
         for (int id = 0; id < GGML_SYCL_MAX_DEVICES; ++id) {
             g_sycl_device_id2index[id].index = -1;
             g_device_caps[id].vmm = 0;
@@ -11361,70 +11456,58 @@ void ggml_init_sycl() try {
             g_tensor_split[id] = 0;
         }
 
-        int device_inx = -1;
-        for (int id = 0; id < g_all_sycl_device_count; ++id) {
-            if(id!=user_device_id) continue;
+        // int device_inx = -1;
+        for (int i = 0; i < g_device_count; ++i) {
+            // if(id!=user_device_id) continue;
 
-            device_inx++;
+            // device_inx++;
+            int device_id = g_sycl_gpu_mgr->gpus[i];
 
-            g_device_caps[device_inx].vmm = 0;
-            g_device_caps[device_inx].device_id = id;
-            g_sycl_device_id2index[id].index = device_inx;
+            g_device_caps[i].vmm = 0;
+            g_device_caps[i].device_id = device_id;
+            g_sycl_device_id2index[device_id].index = i;
 
             dpct::device_info prop;
             SYCL_CHECK(CHECK_TRY_ERROR(dpct::get_device_info(
-                prop, dpct::dev_mgr::instance().get_device(id))));
+                prop, dpct::dev_mgr::instance().get_device(device_id))));
 
-            g_tensor_split[device_inx] = total_vram;
+            g_tensor_split[i] = total_vram;
             total_vram += prop.get_global_mem_size();
 
-            g_device_caps[device_inx].cc =
+            g_device_caps[i].cc =
                 100 * prop.get_major_version() + 10 * prop.get_minor_version();
-
-        }
-        device_inx = -1;
-        for (int id = 0; id < g_all_sycl_device_count; ++id) {
-            if(id!=user_device_id) continue;
-            device_inx++;
-            g_tensor_split[device_inx] /= total_vram;
         }
 
-        device_inx = -1;
-        for (int id = 0; id < g_all_sycl_device_count; ++id) {
-            if(id!=user_device_id) continue;
-            device_inx++;
-            SYCL_CHECK(ggml_sycl_set_device(id));
+        // for (int i = 0; i < GGML_SYCL_MAX_DEVICES; ++i) {
+        //     printf("g_sycl_device_id2index[%d].index=%d\n", i, g_sycl_device_id2index[i].index);
+        //     printf("g_device_caps[%d].device_id=%d\n", i, g_device_caps[i].device_id);
+        // }
+
+        for (int i = 0; i < g_device_count; ++i) {
+            g_tensor_split[i] /= total_vram;
+        }
+
+        for (int i = 0; i < g_device_count; ++i) {
+            int device_id = g_sycl_gpu_mgr->gpus[i];
+            SYCL_CHECK(ggml_sycl_set_device(device_id));
 
             // create sycl streams
             for (int is = 0; is < MAX_STREAMS; ++is) {
-                /*
-                DPCT1025:88: The SYCL queue is created ignoring the flag and
-                priority options.
-                */
                 SYCL_CHECK(CHECK_TRY_ERROR(
-                    g_syclStreams[device_inx][is] =
+                    g_syclStreams[i][is] =
                         dpct::get_current_device().create_queue()));
             }
 
-            const dpct::queue_ptr stream = g_syclStreams[device_inx][0];
+            const dpct::queue_ptr stream = g_syclStreams[i][0];
             // create sycl handle
-            SYCL_CHECK(CHECK_TRY_ERROR(g_sycl_handles[device_inx] =
+            SYCL_CHECK(CHECK_TRY_ERROR(g_sycl_handles[i] =
                                               stream));
-            /*
-            DPCT1027:89: The call to syclSetMathMode was replaced with 0
-            because this functionality is redundant in SYCL.
-            */
-            SYCL_CHECK(0);
         }
 
-        // configure logging to stdout
-        // SYCL_CHECK(syclLoggerConfigure(1, 1, 0, nullptr));
-
         //hardcode, force set to 1 device
-        g_device_count = 1;
-        ggml_sycl_set_main_device(user_device_id);
-        ggml_sycl_set_device(user_device_id);
-        g_work_group_size = get_work_group_size(user_device_id);
+        // ggml_sycl_set_main_device(user_device_id);
+        // ggml_sycl_set_device(user_device_id);
+        g_work_group_size = g_sycl_gpu_mgr->work_group_size;
         // fprintf(stderr, "Using Device %d\n", user_device_id);
 
         // for (int id = 0; id < g_all_sycl_device_count; ++id) {
@@ -12196,6 +12279,8 @@ inline void ggml_sycl_op_mul_mat_sycl(
     const int64_t src1_ncols, const int64_t src1_padded_row_size,
     const dpct::queue_ptr &stream) try {
 
+    // printf("zjy ggml_sycl_op_mul_mat_sycl src0_dd_i=%p\n", src0_dd_i);
+
     GGML_ASSERT(src0_dd_i  != nullptr);
     GGML_ASSERT(src1_ddf_i != nullptr);
     GGML_ASSERT(dst_dd_i   != nullptr);
@@ -12773,6 +12858,9 @@ static void ggml_sycl_op_mul_mat(const ggml_tensor *src0,
     char  * src1_ddq[GGML_SYCL_MAX_DEVICES] = {nullptr}; // q8_1
     float *   dst_dd[GGML_SYCL_MAX_DEVICES] = {nullptr};
 
+    // for(int i=0;i<GGML_SYCL_MAX_DEVICES;i++) {
+    //     printf("zjy src1_ddf[%d]=%p\n", i, src1_ddf[i]);
+    // }
     // as = actual size
     size_t  src0_as[GGML_SYCL_MAX_DEVICES] = {0};
     size_t src1_asf[GGML_SYCL_MAX_DEVICES] = {0};
@@ -12823,11 +12911,15 @@ static void ggml_sycl_op_mul_mat(const ggml_tensor *src0,
         ggml_sycl_set_device(get_device_id_by_index(id));
         const dpct::queue_ptr stream = g_syclStreams[id][0];
 
+        // printf("zjy id=%d device_id=%d\n", id, get_device_id_by_index(id));
+
         if (src0_on_device && src0_is_contiguous) {
+            // printf("zjy src0_extra->data_device[id]=%p\n", src0_extra->data_device[id]);
             src0_dd[id] = (char *) src0_extra->data_device[id];
         } else {
             // const size_t size_src0_ddq = split ? (row_high[id]-row_low[id])*ne00 * src0_ts/src0_bs : ggml_nbytes(src0);
             src0_dd[id] = (char *) ggml_sycl_pool_malloc(ggml_nbytes(src0), &src0_as[id]);
+            // printf("zjy src0_dd[id]=%p\n", src0_dd[id]);
         }
 
         if (src1_on_device && src1_is_contiguous) {
@@ -12878,10 +12970,12 @@ static void ggml_sycl_op_mul_mat(const ggml_tensor *src0,
         const int64_t src1_ncols = src1_col_0 + src1_col_stride > ne11 ? ne11 - src1_col_0 : src1_col_stride;
 
         for (int64_t id = 0; id < g_device_count; ++id) {
+            // printf("zjy id=%d g_main_device_index=%d\n", id, g_main_device_index);
+
             if ((!split && id != g_main_device_index) || row_low[id] == row_high[id]) {
                 continue;
             }
-
+            // printf("zjy id=%d device_id=%d\n", id, get_device_id_by_index(id));
             const bool src1_on_device = src1->backend == GGML_BACKEND_GPU && id == g_main_device_index;
             const bool  dst_on_device =  dst->backend == GGML_BACKEND_GPU && id == g_main_device_index;
             const int64_t row_diff = row_high[id] - row_low[id];
@@ -12954,6 +13048,8 @@ static void ggml_sycl_op_mul_mat(const ggml_tensor *src0,
                     src1_padded_col_size = (i0 * ne11 + src1_col_0) * ne10;
                 }
                 // do the computation
+                // printf("zjy src0_dd_i=%p src0_dd[id]=%p, (i0/i02_divisor) * (ne01*ne00*src0_ts)/src0_bs=%lu,id=%d, i0=%d\n",
+                //     src0_dd_i, src0_dd[id], (i0/i02_divisor) * (ne01*ne00*src0_ts)/src0_bs, id, i0);
                 op(src0, src1, dst, src0_dd_i, src1_ddf_i, src1_ddq_i, dst_dd_i,
                    row_low[id], row_high[id], src1_ncols, src1_padded_col_size, stream);
                 /*
@@ -14305,6 +14401,8 @@ void ggml_sycl_set_main_device(const int main_device) try {
         return;
     }
 
+    check_allow_gpu(main_device);
+
     if (g_main_device != main_device && g_device_count >= 1) {
         g_main_device = main_device;
         g_main_device_index = get_device_index_by_id(g_main_device);
@@ -14506,27 +14604,15 @@ bool ggml_sycl_compute_forward(struct ggml_compute_params * params, struct ggml_
 }
 
 GGML_API GGML_CALL void   ggml_sycl_get_gpu_list(int *id_list, int max_len) try {
-    int max_compute_units = -1;
-    for(int i=0;i<max_len;i++) id_list[i] = 0;
+    for(int i=0;i<max_len;i++) id_list[i] = -1;
 
-    int device_count = dpct::dev_mgr::instance().device_count();
-
-    for(int id=0; id< device_count; id++){
-        sycl::device device = dpct::dev_mgr::instance().get_device(id);
-        if (!device.is_gpu()) continue;
-        dpct::device_info prop;
-        dpct::get_device_info(prop, device);
-        if(max_compute_units < prop.get_max_compute_units()) max_compute_units = prop.get_max_compute_units();
+    if (!g_sycl_gpu_mgr) {
+        g_sycl_gpu_mgr = new sycl_gpu_mgr();
     }
 
-    for(int id=0;id< device_count;id++){
-        sycl::device device = dpct::dev_mgr::instance().get_device(id);
-        if (!device.is_gpu()) continue;
-        dpct::device_info prop;
-        dpct::get_device_info(prop, device);
-        if(max_compute_units == prop.get_max_compute_units() && prop.get_major_version() == 1 ){
-            id_list[id] = 1;
-        }
+    for (int i=0;i< g_sycl_gpu_mgr->gpus.size();i++){
+        if (i>=max_len) break;
+        id_list[i] = g_sycl_gpu_mgr->gpus[i];
     }
     return;
 }
@@ -14583,7 +14669,9 @@ struct ggml_backend_sycl_buffer_context {
     size_t temp_tensor_extra_index = 0;
     std::string name;
 
-     ggml_backend_sycl_buffer_context(int device, void * dev_ptr) : device(device), dev_ptr(dev_ptr) {}
+     ggml_backend_sycl_buffer_context(int device, void * dev_ptr) :
+        device(device), dev_ptr(dev_ptr),
+        name(GGML_SYCL_NAME + std::to_string(device)) {}
 
     ~ ggml_backend_sycl_buffer_context() {
         delete[] temp_tensor_extras;
@@ -14646,9 +14734,9 @@ static void ggml_backend_sycl_buffer_init_tensor(ggml_backend_buffer_t buffer,
     }
 
     ggml_tensor_extra_gpu * extra = ctx->ggml_sycl_alloc_temp_tensor_extra();
-
-    extra->data_device[ctx->device] = tensor->data;
-
+    int device_index = get_device_index_by_id(ctx->device);
+    extra->data_device[device_index] = tensor->data;
+    // printf("zjy ggml_backend_sycl_buffer_init_tensor ctx->device=%d device_index=%d, tensor->data=%p\n", ctx->device, device_index, tensor->data);
     tensor->backend = GGML_BACKEND_GPU;
     tensor->extra = extra;
 
@@ -14662,7 +14750,7 @@ static void ggml_backend_sycl_buffer_init_tensor(ggml_backend_buffer_t buffer,
         size_t padded_size = ggml_backend_buft_get_alloc_size(buffer->buft, tensor);
 
         if (padded_size > original_size && tensor->view_src == nullptr) {
-            SYCL_CHECK(CHECK_TRY_ERROR(g_syclStreams[ctx->device][0]->memset(
+            SYCL_CHECK(CHECK_TRY_ERROR(g_syclStreams[device_index][0]->memset(
                 (char *)tensor->data + original_size, 0,
                 padded_size - original_size)));
         }
@@ -14784,9 +14872,9 @@ ggml_backend_sycl_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft,
     void * dev_ptr;
     SYCL_CHECK(CHECK_TRY_ERROR(dev_ptr = (void *)sycl::malloc_device(
                                     size, *stream)));
-
-     ggml_backend_sycl_buffer_context * ctx = new  ggml_backend_sycl_buffer_context(device, dev_ptr);
-
+    ggml_backend_sycl_buffer_context * ctx = new  ggml_backend_sycl_buffer_context(device, dev_ptr);
+    // printf("zjy ggml_backend_sycl_buffer_type_alloc_buffer device=%d, device_index=%d, dev_ptr=%p\n",
+    //     device, device_index, dev_ptr);
     return ggml_backend_buffer_init(buft, ggml_backend_sycl_buffer_interface, ctx, size);
 }
 catch (sycl::exception const &exc) {
@@ -14945,8 +15033,8 @@ static void ggml_backend_sycl_set_tensor_async(ggml_backend_t backend,
 
     GGML_ASSERT(tensor->buffer->buft == ggml_backend_sycl_buffer_type(sycl_ctx->device) && "unsupported buffer type");
     GGML_ASSERT(tensor->backend == GGML_BACKEND_GPU);
-
-    SYCL_CHECK(CHECK_TRY_ERROR(g_syclStreams[sycl_ctx->device][0]->memcpy(
+    int device_index = get_device_index_by_id(sycl_ctx->device);
+    SYCL_CHECK(CHECK_TRY_ERROR(g_syclStreams[device_index][0]->memcpy(
         (char *)tensor->data + offset, data, size)));
 }
 catch (sycl::exception const &exc) {
@@ -14963,8 +15051,8 @@ static void ggml_backend_sycl_get_tensor_async(ggml_backend_t backend,
 
     GGML_ASSERT(tensor->buffer->buft == ggml_backend_sycl_buffer_type(sycl_ctx->device) && "unsupported buffer type");
     GGML_ASSERT(tensor->backend == GGML_BACKEND_GPU);
-
-    SYCL_CHECK(CHECK_TRY_ERROR(g_syclStreams[sycl_ctx->device][0]->memcpy(
+    int device_index = get_device_index_by_id(sycl_ctx->device);
+    SYCL_CHECK(CHECK_TRY_ERROR(g_syclStreams[device_index][0]->memcpy(
         data, (const char *)tensor->data + offset, size)));
 }
 catch (sycl::exception const &exc) {
@@ -14975,8 +15063,8 @@ catch (sycl::exception const &exc) {
 
 static void ggml_backend_sycl_synchronize(ggml_backend_t backend) try {
     ggml_backend_context_sycl * sycl_ctx = (ggml_backend_context_sycl *)backend->context;
-
-    SYCL_CHECK(CHECK_TRY_ERROR(g_syclStreams[sycl_ctx->device][0]->wait()));
+    int device_index = get_device_index_by_id(sycl_ctx->device);
+    SYCL_CHECK(CHECK_TRY_ERROR(g_syclStreams[device_index][0]->wait()));
 
     UNUSED(backend);
 }
