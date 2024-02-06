@@ -102,6 +102,10 @@
 #define LLAMA_MAX_NODES   8192
 #define LLAMA_MAX_EXPERTS 8
 
+#if (defined(GGML_USE_CUBLAS) || defined(GGML_USE_SYCL))
+#define GGML_USE_CUBLAS_SYCL
+#endif
+
 //
 // logging
 //
@@ -1305,7 +1309,9 @@ static ggml_backend_buffer_type_t llama_default_buffer_type_cpu(bool host_buffer
         buft = ggml_backend_cuda_host_buffer_type();
     }
 #elif defined(GGML_USE_SYCL)
-    buft = ggml_backend_sycl_host_buffer_type();
+    if (host_buffer) {
+        buft = ggml_backend_sycl_host_buffer_type();
+    }
 #elif defined(GGML_USE_CPU_HBM)
     buft = ggml_backend_cpu_hbm_buffer_type();
 #elif defined(GGML_USE_VULKAN)
@@ -1356,6 +1362,12 @@ static ggml_backend_buffer_type_t llama_default_buffer_type_split(int fallback_g
 #ifdef GGML_USE_CUBLAS
     if (ggml_backend_cuda_get_device_count() > 1) {
         buft = ggml_backend_cuda_split_buffer_type(tensor_split);
+    }
+#endif
+
+#ifdef GGML_USE_SYCL
+    if (ggml_backend_sycl_get_device_count() > 1) {
+        buft = ggml_backend_sycl_split_buffer_type(tensor_split);
     }
 #endif
 
@@ -3445,6 +3457,57 @@ static bool llm_load_tensors(
         }
     } else
 #endif
+#ifdef GGML_USE_SYCL
+    if (split_mode == LLAMA_SPLIT_LAYER) {
+        // calculate the split points
+        int device_count = ggml_backend_sycl_get_device_count();
+        bool all_zero = tensor_split == nullptr || std::all_of(tensor_split, tensor_split + device_count, [](float x) { return x == 0.0f; });
+        float splits[GGML_SYCL_MAX_DEVICES];
+        int id_list[GGML_SYCL_MAX_DEVICES];
+        ggml_sycl_get_gpu_list(id_list, GGML_SYCL_MAX_DEVICES);
+        if (all_zero) {
+            // default split, by free memory
+
+            for (int i = 0; i < device_count; ++i) {
+                int device = id_list[i];
+                assert(device>=0);
+                size_t total;
+                size_t free;
+                ggml_backend_sycl_get_device_memory(device, &total, &free);
+                splits[i] = free;
+            }
+        } else {
+            std::copy(tensor_split, tensor_split + device_count, splits);
+        }
+        // sum and normalize the splits to get the split points
+        float split_sum = 0.0f;
+        for (int i = 0; i < device_count; ++i) {
+            split_sum += splits[i];
+            splits[i] = split_sum;
+        }
+        for (int i = 0; i < device_count; ++i) {
+            splits[i] /= split_sum;
+        }
+
+        // assign the repeating layers to the devices according to the splits
+        int act_gpu_layers = std::min(n_gpu_layers, (int)n_layer + 1);
+        for (int i = i_gpu_start; i < n_layer; ++i) {
+            int layer_gpu_index = std::upper_bound(splits, splits + device_count, float(i - i_gpu_start)/act_gpu_layers) - splits;
+            int layer_gpu = id_list[layer_gpu_index];
+            model.buft_layer[i] = llama_default_buffer_type_offload(layer_gpu);
+            printf("zjy model.buft_layer[%d] gpu:%d\n", i, layer_gpu);
+        }
+        // assign the output layer
+        if (n_gpu_layers > n_layer) {
+            int layer_gpu_index = std::upper_bound(splits, splits + device_count, float(act_gpu_layers - 1)/act_gpu_layers) - splits;
+            int layer_gpu = id_list[layer_gpu_index];
+            model.buft_output = llama_default_buffer_type_offload(layer_gpu);
+            printf("zjy model.buft_output gpu:%d\n", layer_gpu);
+        } else {
+            model.buft_output = llama_default_buffer_type_cpu(true);
+        }
+    } else
+#endif
     {
         ggml_backend_buffer_type_t split_buft;
         if (split_mode == LLAMA_SPLIT_ROW) {
@@ -4105,7 +4168,9 @@ static bool llm_load_tensors(
     // create the backend buffers
     std::vector<std::pair<ggml_context *, ggml_backend_buffer_t>> ctx_bufs;
 
+    int cnt1=0;
     for (auto & it : ctx_map) {
+        printf("zjy ctx_map=%d\n", cnt1++);
         ggml_backend_buffer_type_t buft = it.first;
         ggml_context * ctx = it.second;
         ggml_backend_buffer_t buf = nullptr;
@@ -4165,8 +4230,11 @@ static bool llm_load_tensors(
     }
 
     // populate tensors_by_name
+    int cnt=0;
     for (ggml_context * ctx : model.ctxs) {
+        // printf("zjy ctx=%d\n", cnt++);
         for (auto * cur = ggml_get_first_tensor(ctx); cur != NULL; cur = ggml_get_next_tensor(ctx, cur)) {
+            // printf("zjy ggml_get_name(cur)=%s\n", ggml_get_name(cur));
             model.tensors_by_name.emplace_back(ggml_get_name(cur), cur);
         }
     }
@@ -6952,6 +7020,7 @@ static struct ggml_cgraph * llama_build_graph(
     return result;
 }
 
+
 // decode a batch of tokens by evaluating the transformer
 //
 //   - lctx:      llama context
@@ -7049,8 +7118,8 @@ static int llama_decode_internal(
 
     ggml_backend_sched_reset(lctx.sched);
     ggml_backend_sched_set_eval_callback(lctx.sched, lctx.cparams.cb_eval, lctx.cparams.cb_eval_user_data);
-
     ggml_cgraph * gf = llama_build_graph(lctx, batch);
+
 
     // the output is always the last tensor in the graph
     struct ggml_tensor * res = gf->nodes[gf->n_nodes - 1];
@@ -10500,21 +10569,39 @@ struct llama_context * llama_new_context_with_model(
                 }
             }
         }
+#elif defined(GGML_USE_SYCL)
+        if (model->n_gpu_layers > 0) {
+            // with split_mode LLAMA_SPLIT_NONE or LLAMA_SPLIT_ROW, only the main GPU backend is used
+            if (model->split_mode == LLAMA_SPLIT_NONE || model->split_mode == LLAMA_SPLIT_ROW) {
+                ggml_backend_t backend = ggml_backend_sycl_init(model->main_gpu);
+                if (backend == nullptr) {
+                    LLAMA_LOG_ERROR("%s: failed to initialize SYCL%d backend\n", __func__, model->main_gpu);
+                    llama_free(ctx);
+                    return nullptr;
+                }
+                ctx->backends.push_back(backend);
+            } else {
+                // LLAMA_SPLIT_LAYER requires a backend for each GPU
+                int id_list[GGML_SYCL_MAX_DEVICES];
+                ggml_sycl_get_gpu_list(id_list, GGML_SYCL_MAX_DEVICES);
+                for (int i = 0; i < ggml_backend_sycl_get_device_count(); ++i) {
+                    int device = id_list[i];
+                    assert(device>=0);
+                    ggml_backend_t backend = ggml_backend_sycl_init(device);
+                    if (backend == nullptr) {
+                        LLAMA_LOG_ERROR("%s: failed to initialize SYCL%d backend\n", __func__, device);
+                        llama_free(ctx);
+                        return nullptr;
+                    }
+                    ctx->backends.push_back(backend);
+                }
+            }
+        }
 #elif defined(GGML_USE_VULKAN)
         if (model->n_gpu_layers > 0) {
             ggml_backend_t backend = ggml_backend_vk_init();
             if (backend == nullptr) {
                 LLAMA_LOG_ERROR("%s: failed to initialize Vulkan backend\n", __func__);
-                llama_free(ctx);
-                return nullptr;
-            }
-            ctx->backends.push_back(backend);
-        }
-#elif defined(GGML_USE_SYCL)
-        if (model->n_gpu_layers > 0) {
-            ggml_backend_t backend = ggml_backend_sycl_init(model->main_gpu);
-            if (backend == nullptr) {
-                LLAMA_LOG_ERROR("%s: failed to initialize SYCL%d backend\n", __func__, model->main_gpu);
                 llama_free(ctx);
                 return nullptr;
             }
