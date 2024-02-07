@@ -665,7 +665,7 @@ namespace dpct
 #if (defined(__SYCL_COMPILER_VERSION) && __SYCL_COMPILER_VERSION >= 20221105)
             if (!has(sycl::aspect::ext_intel_free_memory))
             {
-                std::cerr << "get_memory_info: ext_intel_free_memory is not supported, use total memory as free memory" << std::endl;
+                std::cerr << "get_memory_info: ext_intel_free_memory is not supported (set ZES_ENABLE_SYSMAN=1 to support), use total memory as free memory " << std::endl;
                 free_memory = total_memory;
             }
             else
@@ -673,7 +673,7 @@ namespace dpct
                 free_memory = get_info<sycl::ext::intel::info::device::free_memory>();
             }
 #else
-            std::cerr << "get_memory_info: ext_intel_free_memory is not supported, use total memory as free memory" << std::endl;
+            std::cerr << "get_memory_info: ext_intel_free_memory is not supported (set ZES_ENABLE_SYSMAN=1 to support), use total memory as free memory" << std::endl;
             free_memory = total_memory;
 #if defined(_MSC_VER) && !defined(__clang__)
 #pragma message("Querying the number of bytes of free memory is not supported")
@@ -3262,7 +3262,8 @@ class sycl_gpu_mgr {
     public:
         std::vector<int> gpus;
         std::vector<sycl::device> devices;
-
+        sycl::queue *first_queue;
+        sycl::context co_ctx;
         int max_compute_units = 0;
         int work_group_size = 0;
         std::string gpus_list="";
@@ -3270,6 +3271,18 @@ class sycl_gpu_mgr {
         sycl_gpu_mgr() {
             detect_sycl_gpu_list_with_max_cu();
             get_allow_gpus();
+            create_context_with_gpus();
+        }
+
+        void create_context_with_gpus() {
+            sycl::context ctx = sycl::context(devices);
+            assert(gpus.size()>0);
+            first_queue = dpct::get_current_device().create_queue(ctx, devices[0]);
+            co_ctx = first_queue->get_context();
+        }
+
+        sycl::context &get_co_ctx() {
+            return co_ctx;
         }
 
         void get_allow_gpus() {
@@ -3358,8 +3371,6 @@ static sycl_device_capabilities g_device_caps[GGML_SYCL_MAX_DEVICES] = { {0, fal
 struct sycl_device_id2index {
     int index;
 };
-
-static sycl_device_id2index g_sycl_device_id2index[GGML_SYCL_MAX_DEVICES] = { {-1} };
 
 static void * g_scratch_buffer = nullptr;
 static size_t g_scratch_size = 0; // disabled by default
@@ -11421,7 +11432,7 @@ void ggml_backend_sycl_print_sycl_devices() {
 void print_gpu_device_list() {
     auto &gpus = g_sycl_gpu_mgr->gpus;
 
-    fprintf(stderr, "default use %d SYCL GPUs: [%s] with Max compute units:%d\n",
+    fprintf(stderr, "defaultly use %d SYCL GPUs: [%s] with Max compute units:%d\n",
             gpus.size(), g_sycl_gpu_mgr->gpus_list.c_str(), g_sycl_gpu_mgr->max_compute_units);
 }
 
@@ -11486,7 +11497,6 @@ void ggml_init_sycl() try {
 */
 
         for (int id = 0; id < GGML_SYCL_MAX_DEVICES; ++id) {
-            g_sycl_device_id2index[id].index = -1;
             g_device_caps[id].vmm = 0;
             g_device_caps[id].device_id = -1;
             g_device_caps[id].cc = 0;
@@ -11503,7 +11513,6 @@ void ggml_init_sycl() try {
 
             g_device_caps[device_id].vmm = 0;
             // g_device_caps[device_id].device_id = device_id;
-            // g_sycl_device_id2index[device_id].index = i;
 
             dpct::device_info prop;
             SYCL_CHECK(CHECK_TRY_ERROR(dpct::get_device_info(
@@ -11521,14 +11530,6 @@ void ggml_init_sycl() try {
             g_default_tensor_split[i] /= total_vram;
         }
 
-        std::vector<sycl::device> devs;
-        for (auto i : g_sycl_gpu_mgr->gpus){
-            devs.push_back(dpct::dev_mgr::instance().get_device(i));
-        }
-
-        sycl::context co_cxt = sycl::context(devs);
-        sycl::queue *first_queue = dpct::get_current_device().create_queue(co_cxt, devs[0]);
-
         for (int i = 0; i < g_device_count; ++i) {
             int device_id = g_sycl_gpu_mgr->gpus[i];
             SYCL_CHECK(ggml_sycl_set_device(device_id));
@@ -11537,7 +11538,9 @@ void ggml_init_sycl() try {
             for (int is = 0; is < MAX_STREAMS; ++is) {
                 SYCL_CHECK(CHECK_TRY_ERROR(
                     g_syclStreams[device_id][is] =
-                        dpct::get_current_device().create_queue(first_queue->get_context(), dpct::get_current_device())));
+                        dpct::get_current_device().create_queue(
+                            g_sycl_gpu_mgr->get_co_ctx(),
+                            dpct::get_current_device())));
             }
 
             const dpct::queue_ptr stream = g_syclStreams[device_id][0];
