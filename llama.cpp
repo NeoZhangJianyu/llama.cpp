@@ -3495,14 +3495,14 @@ static bool llm_load_tensors(
             int layer_gpu_index = std::upper_bound(splits, splits + device_count, float(i - i_gpu_start)/act_gpu_layers) - splits;
             int layer_gpu = id_list[layer_gpu_index];
             model.buft_layer[i] = llama_default_buffer_type_offload(layer_gpu);
-            printf("zjy model.buft_layer[%d] gpu:%d\n", i, layer_gpu);
+            // printf("zjy model.buft_layer[%d] gpu:%d\n", i, layer_gpu);
         }
         // assign the output layer
         if (n_gpu_layers > n_layer) {
             int layer_gpu_index = std::upper_bound(splits, splits + device_count, float(act_gpu_layers - 1)/act_gpu_layers) - splits;
             int layer_gpu = id_list[layer_gpu_index];
             model.buft_output = llama_default_buffer_type_offload(layer_gpu);
-            printf("zjy model.buft_output gpu:%d\n", layer_gpu);
+            // printf("zjy model.buft_output gpu:%d\n", layer_gpu);
         } else {
             model.buft_output = llama_default_buffer_type_cpu(true);
         }
@@ -4170,7 +4170,7 @@ static bool llm_load_tensors(
 
     int cnt1=0;
     for (auto & it : ctx_map) {
-        printf("zjy ctx_map=%d\n", cnt1++);
+        // printf("zjy ctx_map=%d\n", cnt1++);
         ggml_backend_buffer_type_t buft = it.first;
         ggml_context * ctx = it.second;
         ggml_backend_buffer_t buf = nullptr;
