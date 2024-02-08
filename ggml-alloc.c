@@ -826,18 +826,19 @@ ggml_backend_buffer_t ggml_backend_alloc_ctx_tensors_from_buft(struct ggml_conte
     // printf("zjy ggml_backend_alloc_ctx_tensors_from_buft buft->context=%p\n", buft->context);
     size_t alignment = ggml_backend_buft_get_alignment(buft);
     size_t max_size = ggml_backend_buft_get_max_size(buft);
-
+    // printf("zjy %s 1\n", __func__);
     ggml_backend_buffer_t * buffers = NULL;
     size_t n_buffers = 0;
 
     size_t cur_buf_size = 0;
     struct ggml_tensor * first = ggml_get_first_tensor(ctx);
+    // printf("zjy %s 2\n", __func__);
     for (struct ggml_tensor * t = first; t != NULL; t = ggml_get_next_tensor(ctx, t)) {
         size_t this_size = 0;
         if (t->data == NULL && t->view_src == NULL) {
             this_size = GGML_PAD(ggml_backend_buft_get_alloc_size(buft, t), alignment);
         }
-
+        // printf("zjy %s 3\n", __func__);
         if (this_size > max_size) {
             // tensor is too large to fit in a single buffer
             fprintf(stderr, "%s: tensor %s is too large to fit in a %s buffer (tensor size: %zu, max buffer size: %zu)\n",
@@ -850,7 +851,7 @@ ggml_backend_buffer_t ggml_backend_alloc_ctx_tensors_from_buft(struct ggml_conte
             free(buffers);
             return NULL;
         }
-
+        // printf("zjy %s 4\n", __func__);
         if ((cur_buf_size + this_size) > max_size) {
             // allocate tensors in the current buffer
             if (!alloc_tensor_range(ctx, first, t, buft, cur_buf_size, &buffers, &n_buffers)) {
@@ -861,15 +862,16 @@ ggml_backend_buffer_t ggml_backend_alloc_ctx_tensors_from_buft(struct ggml_conte
         } else {
             cur_buf_size += this_size;
         }
+        // printf("zjy %s 5\n", __func__);
     }
-
+    // printf("zjy %s 6\n", __func__);
     // allocate remaining tensors
     if (cur_buf_size > 0) {
         if (!alloc_tensor_range(ctx, first, NULL, buft, cur_buf_size, &buffers, &n_buffers)) {
             return NULL;
         }
     }
-
+    // printf("zjy %s 7\n", __func__);
     if (n_buffers == 0) {
         // all the tensors in the context are already allocated
 #ifndef NDEBUG
@@ -884,6 +886,7 @@ ggml_backend_buffer_t ggml_backend_alloc_ctx_tensors_from_buft(struct ggml_conte
     } else {
         buffer = ggml_backend_multi_buffer_alloc_buffer(buffers, n_buffers);
     }
+    // printf("zjy %s 8\n", __func__);
     free(buffers);
     return buffer;
 }
