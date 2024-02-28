@@ -157,9 +157,9 @@ static const char * output_format_str(output_formats format) {
 
 static const char * split_mode_str(llama_split_mode mode) {
     switch (mode) {
-        case LLAMA_SPLIT_NONE:  return "none";
-        case LLAMA_SPLIT_LAYER: return "layer";
-        case LLAMA_SPLIT_ROW:   return "row";
+        case LLAMA_SPLIT_MODE_NONE:  return "none";
+        case LLAMA_SPLIT_MODE_LAYER: return "layer";
+        case LLAMA_SPLIT_MODE_ROW:   return "row";
         default: GGML_ASSERT(!"invalid split mode");
     }
 }
@@ -193,7 +193,7 @@ static const cmd_params cmd_params_defaults = {
     /* type_v        */ {GGML_TYPE_F16},
     /* n_threads     */ {get_num_physical_cores()},
     /* n_gpu_layers  */ {99},
-    /* split_mode    */ {LLAMA_SPLIT_LAYER},
+    /* split_mode    */ {LLAMA_SPLIT_MODE_LAYER},
     /* main_gpu      */ {0},
     /* no_kv_offload */ {false},
     /* mul_mat_q     */ {true},
@@ -358,11 +358,11 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
             for (const auto & m : p) {
                 llama_split_mode mode;
                 if (m == "none") {
-                    mode = LLAMA_SPLIT_NONE;
+                    mode = LLAMA_SPLIT_MODE_NONE;
                 } else if (m == "layer") {
-                    mode = LLAMA_SPLIT_LAYER;
+                    mode = LLAMA_SPLIT_MODE_LAYER;
                 } else if (m == "row") {
-                    mode = LLAMA_SPLIT_ROW;
+                    mode = LLAMA_SPLIT_MODE_ROW;
                 } else {
                     invalid_param = true;
                     break;
@@ -948,46 +948,46 @@ struct markdown_printer : public printer {
 
     void print_header(const cmd_params & params) override {
         // select fields to print
-        fields.push_back("model");
-        fields.push_back("size");
-        fields.push_back("params");
-        fields.push_back("backend");
+        fields.emplace_back("model");
+        fields.emplace_back("size");
+        fields.emplace_back("params");
+        fields.emplace_back("backend");
         bool is_cpu_backend = test::get_backend() == "CPU" || test::get_backend() == "BLAS";
         if (!is_cpu_backend) {
-            fields.push_back("n_gpu_layers");
+            fields.emplace_back("n_gpu_layers");
         }
         if (params.n_threads.size() > 1 || params.n_threads != cmd_params_defaults.n_threads || is_cpu_backend) {
-            fields.push_back("n_threads");
+            fields.emplace_back("n_threads");
         }
         if (params.n_batch.size() > 1 || params.n_batch != cmd_params_defaults.n_batch) {
-            fields.push_back("n_batch");
+            fields.emplace_back("n_batch");
         }
         if (params.type_k.size() > 1 || params.type_k != cmd_params_defaults.type_k) {
-            fields.push_back("type_k");
+            fields.emplace_back("type_k");
         }
         if (params.type_v.size() > 1 || params.type_v != cmd_params_defaults.type_v) {
-            fields.push_back("type_v");
+            fields.emplace_back("type_v");
         }
         if (params.main_gpu.size() > 1 || params.main_gpu != cmd_params_defaults.main_gpu) {
-            fields.push_back("main_gpu");
+            fields.emplace_back("main_gpu");
         }
         if (params.split_mode.size() > 1 || params.split_mode != cmd_params_defaults.split_mode) {
-            fields.push_back("split_mode");
+            fields.emplace_back("split_mode");
         }
         if (params.mul_mat_q.size() > 1 || params.mul_mat_q != cmd_params_defaults.mul_mat_q) {
-            fields.push_back("mul_mat_q");
+            fields.emplace_back("mul_mat_q");
         }
         if (params.no_kv_offload.size() > 1 || params.no_kv_offload != cmd_params_defaults.no_kv_offload) {
-            fields.push_back("no_kv_offload");
+            fields.emplace_back("no_kv_offload");
         }
         if (params.tensor_split.size() > 1 || params.tensor_split != cmd_params_defaults.tensor_split) {
-            fields.push_back("tensor_split");
+            fields.emplace_back("tensor_split");
         }
         if (params.use_mmap.size() > 1 || params.use_mmap != cmd_params_defaults.use_mmap) {
-            fields.push_back("use_mmap");
+            fields.emplace_back("use_mmap");
         }
-        fields.push_back("test");
-        fields.push_back("t/s");
+        fields.emplace_back("test");
+        fields.emplace_back("t/s");
 
         fprintf(fout, "|");
         for (const auto & field : fields) {
@@ -1151,8 +1151,7 @@ int main(int argc, char ** argv) {
     if (!params.verbose) {
         llama_log_set(llama_null_log_callback, NULL);
     }
-    bool numa = false;
-    llama_backend_init(numa);
+    llama_backend_init();
 
     // initialize printer
     std::unique_ptr<printer> p;
