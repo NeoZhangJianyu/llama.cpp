@@ -14565,10 +14565,10 @@ static void ggml_sycl_op_flatten(const ggml_tensor *src0,
             main_stream->memcpy(dst->data, dst_ddf, ggml_nbytes(dst)).wait()));
     }
 
-    if (dst->backend == GGML_BACKEND_TYPE_CPU) {
-        SYCL_CHECK(CHECK_TRY_ERROR(
-            dpct::get_current_device().queues_wait_and_throw()));
-    }
+    // if (dst->backend == GGML_BACKEND_TYPE_CPU) {
+    //     SYCL_CHECK(CHECK_TRY_ERROR(
+    //         dpct::get_current_device().queues_wait_and_throw()));
+    // }
     // print_ggml_tensor("tensor", dst);
 }
 catch (sycl::exception const &exc) {
@@ -14839,7 +14839,7 @@ static void ggml_sycl_op_mul_mat(const ggml_tensor *src0,
                           SYCL_CHECK(CHECK_TRY_ERROR(stream->memcpy(
                                 src1_ddq_i, src1_ddq_i_source,
                                 src1_ncols * src1_padded_col_size * q8_1_ts /
-                                    q8_1_bs).wait()));
+                                    q8_1_bs)));
                         } else {
 
                             float * src1_ddf_i_source = (float *) src1_extra->data_device[g_main_device];
@@ -14933,7 +14933,7 @@ static void ggml_sycl_op_mul_mat(const ggml_tensor *src0,
                         dhf_dst_i += src1_col_0*ne0;
                         SYCL_CHECK(CHECK_TRY_ERROR(
                             stream->memcpy(dhf_dst_i, dst_dd_i,
-                                           src1_ncols * ne0 * sizeof(float)).wait()));
+                                           src1_ncols * ne0 * sizeof(float))));
                     }
                 }
 
@@ -15362,7 +15362,7 @@ static void ggml_sycl_mul_mat_batched_sycl(const ggml_tensor *src0,
                                          nb02, nb03, nb12_scaled, nb13_scaled,
                                          nbd2, nbd3, r2, r3, item_ct1);
                                  });
-            }).wait();
+            });
         }
         SYCL_CHECK(CHECK_TRY_ERROR(dpct::gemm_batch(
             *g_sycl_handles[g_main_device], oneapi::mkl::transpose::trans,
@@ -15661,8 +15661,8 @@ static void ggml_sycl_mul_mat_id(const ggml_tensor *src0,
     if (ids->backend == GGML_BACKEND_TYPE_GPU) {
         const char * ids_dev = (const char *)((const ggml_tensor_extra_gpu *)ids->extra)->data_device[g_main_device];
         SYCL_CHECK(CHECK_TRY_ERROR(
-            stream->memcpy(ids_host.data(), ids_dev, ggml_nbytes(ids)).wait()));
-        // SYCL_CHECK(CHECK_TRY_ERROR(stream->wait()));
+            stream->memcpy(ids_host.data(), ids_dev, ggml_nbytes(ids))));
+        SYCL_CHECK(CHECK_TRY_ERROR(stream->wait()));
     } else {
         memcpy(ids_host.data(), ids->data, ggml_nbytes(ids));
     }
@@ -15732,7 +15732,7 @@ static void ggml_sycl_mul_mat_id(const ggml_tensor *src0,
 
                 SYCL_CHECK(CHECK_TRY_ERROR(
                     stream->memcpy(src1_contiguous.get() + num_src1_rows * nb11,
-                                   src1_original + i01 * nb11, nb11).wait()));
+                                   src1_original + i01 * nb11, nb11)));
                 num_src1_rows++;
             }
 
@@ -15765,7 +15765,7 @@ static void ggml_sycl_mul_mat_id(const ggml_tensor *src0,
 
                 SYCL_CHECK(CHECK_TRY_ERROR(stream->memcpy(
                     dst_original + i01 * nb1,
-                    dst_contiguous.get() + num_src1_rows * nb1, nb1).wait()));
+                    dst_contiguous.get() + num_src1_rows * nb1, nb1)));
                 num_src1_rows++;
             }
         }
@@ -16014,7 +16014,7 @@ static void ggml_sycl_assign_buffers_impl(struct ggml_tensor *tensor,
         SYCL_CHECK(CHECK_TRY_ERROR(data = (void *)sycl::malloc_device(
                                         size, *stream)));
         SYCL_CHECK(CHECK_TRY_ERROR(
-            (*stream).memset(data, 0, size).wait()));
+            (*stream).memset(data, 0, size)));
         extra = new ggml_tensor_extra_gpu;
         memset(extra, 0, sizeof(*extra));
         extra->data_device[g_main_device] = data;
@@ -16038,7 +16038,7 @@ void ggml_sycl_copy_to_device(struct ggml_tensor *tensor) try {
     SYCL_CHECK(CHECK_TRY_ERROR((*stream)
                                     .memcpy(extra->data_device[g_main_device],
                                             tensor->data, ggml_nbytes(tensor))
-                                    .wait()));
+                                    ));
 }
 catch (sycl::exception const &exc) {
   std::cerr << exc.what() << "Exception caught at file:" << __FILE__
@@ -16442,7 +16442,7 @@ ggml_backend_sycl_buffer_init_tensor(ggml_backend_buffer_t buffer,
         if (padded_size > original_size && tensor->view_src == nullptr) {
             SYCL_CHECK(CHECK_TRY_ERROR(g_syclStreams[ctx->device][0]->memset(
                 (char *)tensor->data + original_size, 0,
-                padded_size - original_size).wait()));
+                padded_size - original_size)));
         }
     }
 }
@@ -16468,7 +16468,7 @@ static void ggml_backend_sycl_buffer_set_tensor(ggml_backend_buffer_t buffer,
     SYCL_CHECK(
         CHECK_TRY_ERROR((*stream)
                              .memcpy((char *)tensor->data + offset, data, size)
-                             .wait()));
+                             ));
 }
 catch (sycl::exception const &exc) {
   std::cerr << exc.what() << "Exception caught at file:" << __FILE__
@@ -16493,7 +16493,7 @@ static void ggml_backend_sycl_buffer_get_tensor(ggml_backend_buffer_t buffer,
     SYCL_CHECK(CHECK_TRY_ERROR(
         (*stream)
             .memcpy(data, (const char *)tensor->data + offset, size)
-            .wait()));
+            ));
 }
 catch (sycl::exception const &exc) {
   std::cerr << exc.what() << "Exception caught at file:" << __FILE__
@@ -16541,7 +16541,7 @@ ggml_backend_sycl_buffer_cpy_tensor(ggml_backend_buffer_t buffer,
 //todo, it's known issue：error in device2device cross GPUs. reused when the issue is fixed. DON"T remove
 #if 0
         SYCL_CHECK(CHECK_TRY_ERROR((*stream).memcpy(
-            (char *)dst->data, (const char *)src->data, size).wait()));
+            (char *)dst->data, (const char *)src->data, size)));
 
         /*
         DPCT1009:201: SYCL uses exceptions to report errors and does not use the
@@ -16573,7 +16573,7 @@ static void ggml_backend_sycl_buffer_clear(ggml_backend_buffer_t buffer,
 
     SYCL_CHECK(CHECK_TRY_ERROR((*stream)
                                     .memset(ctx->dev_ptr, value, buffer->size)
-                                    .wait()));
+                                    ));
 }
 catch (sycl::exception const &exc) {
   std::cerr << exc.what() << "Exception caught at file:" << __FILE__
@@ -16827,7 +16827,7 @@ ggml_backend_sycl_split_buffer_init_tensor(ggml_backend_buffer_t buffer,
             SYCL_CHECK(CHECK_TRY_ERROR(
                 (*g_syclStreams[i][0])
                     .memset(buf + original_size, 0, size - original_size)
-                    .wait()));
+                    ));
         }
 
         extra->data_device[i] = buf;
@@ -16894,7 +16894,7 @@ ggml_backend_sycl_split_buffer_set_tensor(ggml_backend_buffer_t buffer,
         SYCL_CHECK(CHECK_TRY_ERROR(
             (*g_syclStreams[i][0])
                 .memcpy(extra->data_device[i], buf_host, original_size)
-                .wait()));
+                ));
     }
 }
 catch (sycl::exception const &exc) {
@@ -16946,7 +16946,7 @@ ggml_backend_sycl_split_buffer_get_tensor(ggml_backend_buffer_t buffer,
         SYCL_CHECK(CHECK_TRY_ERROR(
             (*g_syclStreams[i][0])
                 .memcpy(buf_host, extra->data_device[i], original_size)
-                .wait()));
+                ));
     }
 }
 catch (sycl::exception const &exc) {
@@ -17161,7 +17161,7 @@ GGML_CALL static void ggml_backend_sycl_set_tensor_async(ggml_backend_t backend,
     GGML_ASSERT(tensor->buffer->buft == ggml_backend_sycl_buffer_type(sycl_ctx->device) && "unsupported buffer type");
     GGML_ASSERT(tensor->backend == GGML_BACKEND_TYPE_GPU);
     SYCL_CHECK(CHECK_TRY_ERROR(g_syclStreams[sycl_ctx->device][0]->memcpy(
-        (char *)tensor->data + offset, data, size).wait()));
+        (char *)tensor->data + offset, data, size)));
 }
 catch (sycl::exception const &exc) {
   std::cerr << exc.what() << "Exception caught at file:" << __FILE__
@@ -17177,7 +17177,7 @@ GGML_CALL static void ggml_backend_sycl_get_tensor_async(ggml_backend_t backend,
     GGML_ASSERT(tensor->buffer->buft == ggml_backend_sycl_buffer_type(sycl_ctx->device) && "unsupported buffer type");
     GGML_ASSERT(tensor->backend == GGML_BACKEND_TYPE_GPU);
     SYCL_CHECK(CHECK_TRY_ERROR(g_syclStreams[sycl_ctx->device][0]->memcpy(
-        data, (const char *)tensor->data + offset, size).wait()));
+        data, (const char *)tensor->data + offset, size)));
 }
 catch (sycl::exception const &exc) {
   std::cerr << exc.what() << "Exception caught at file:" << __FILE__
@@ -17196,7 +17196,7 @@ GGML_CALL static bool ggml_backend_sycl_cpy_tensor_async(ggml_backend_t backend,
         was inserted. You need to rewrite this code.
         */
         SYCL_CHECK(CHECK_TRY_ERROR(g_syclStreams[sycl_ctx->device][0]->memcpy(
-            dst->data, src->data, ggml_nbytes(dst)).wait()));
+            dst->data, src->data, ggml_nbytes(dst))));
         return true;
     }
 
