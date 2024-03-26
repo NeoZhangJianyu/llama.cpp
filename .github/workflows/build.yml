@@ -824,6 +824,10 @@ jobs:
         run:  |
           mkdir build
           examples/sycl/win-build-sycl.bat
+          ls
+          pwd
+          ls build
+          ls build/bin
 
       - name: Determine tag name
         id: tag
@@ -842,6 +846,10 @@ jobs:
         id: pack_artifacts
         if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
         run: |
+          ls
+          pwd
+          ls build
+          ls build/bin
           7z a llama-${{ steps.tag.outputs.name }}-bin-win-sycl-x64.zip .\build\bin\*
 
       - name: Upload artifacts
