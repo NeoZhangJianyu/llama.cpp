@@ -822,12 +822,7 @@ jobs:
       - name: Build
         id: cmake_build
         run:  |
-          mkdir build
           examples/sycl/win-build-sycl.bat
-          ls
-          pwd
-          ls build
-          ls build/bin
 
       - name: Determine tag name
         id: tag
