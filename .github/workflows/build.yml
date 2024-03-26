@@ -823,10 +823,7 @@ jobs:
         id: cmake_build
         run:  |
           mkdir build
-          cd build
-          source "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64 --force
-          cmake -G "MinGW Makefiles" ..  -DLLAMA_SYCL=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icx  -DCMAKE_BUILD_TYPE=Release
-          make -j
+          examples/sycl/win-build-sycl.bat
 
       - name: Determine tag name
         id: tag
