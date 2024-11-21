@@ -966,6 +966,9 @@ jobs:
           echo ${{ github.event_name }}
           echo ${{ github.ref }}
           echo ${{ github.event.inputs.create_release }}          
+          echo ${{ github.base_ref }}
+          echo ${{ github.event }}
+          echo ${{ github }}
           scripts/install-oneapi.bat $WINDOWS_BASEKIT_URL $WINDOWS_DPCPP_MKL
 
       - name: Build
