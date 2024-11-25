@@ -962,7 +962,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install
-        run:  |        
+        run:  |
           scripts/install-oneapi.bat $WINDOWS_BASEKIT_URL $WINDOWS_DPCPP_MKL
 
       - name: Build
