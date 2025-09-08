@@ -118,13 +118,13 @@ inline auto get_onemath_backend(sycl::queue& queue)
 #endif
 }
 
-#ifdef SYCL_EXT_ONEAPI_ENQUEUE_FUNCTIONS
+#ifdef GGML_SYCL_ENQUEUE && SYCL_EXT_ONEAPI_ENQUEUE_FUNCTIONS
     namespace syclex = sycl::ext::oneapi::experimental;
 #endif
 
 template <int NR, typename Func>
 __dpct_inline__ void sycl_parallel_for(sycl::handler & cgh, sycl::nd_range<NR> nd_range, Func && func) {
-#ifdef SYCL_EXT_ONEAPI_ENQUEUE_FUNCTIONS
+#ifdef GGML_SYCL_ENQUEUE && SYCL_EXT_ONEAPI_ENQUEUE_FUNCTIONS
     syclex::nd_launch(cgh, nd_range, func);
 #else
     cgh.parallel_for(nd_range, func);
@@ -133,7 +133,7 @@ __dpct_inline__ void sycl_parallel_for(sycl::handler & cgh, sycl::nd_range<NR> n
 
 template <int NR, typename Func>
 __dpct_inline__ void sycl_parallel_for(sycl::queue * q, sycl::nd_range<NR> nd_range, Func && func) {
-#ifdef SYCL_EXT_ONEAPI_ENQUEUE_FUNCTIONS
+#ifdef GGML_SYCL_ENQUEUE && SYCL_EXT_ONEAPI_ENQUEUE_FUNCTIONS
     syclex::nd_launch(*q, nd_range, func);
 #else
     q->parallel_for(nd_range, func);
@@ -141,7 +141,7 @@ __dpct_inline__ void sycl_parallel_for(sycl::queue * q, sycl::nd_range<NR> nd_ra
 }
 
 template <typename Func> __dpct_inline__ void sycl_launch(sycl::queue * stream, Func && func) {
-#ifdef SYCL_EXT_ONEAPI_ENQUEUE_FUNCTIONS
+#ifdef GGML_SYCL_ENQUEUE && SYCL_EXT_ONEAPI_ENQUEUE_FUNCTIONS
     syclex::submit(*stream, func);
 #else
     stream->submit(func);
