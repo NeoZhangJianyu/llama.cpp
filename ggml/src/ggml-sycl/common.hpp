@@ -22,7 +22,9 @@
 #include "ggml-sycl.h"
 #include "presets.hpp"
 #include "sycl_hw.hpp"
+// #include <syclcompat/kernel.hpp>
 
+namespace syclexp = sycl::ext::oneapi::experimental;
 
 #if GGML_SYCL_DNNL
 #include "dnnl.hpp"
@@ -31,6 +33,8 @@
 
 #define GGML_COMMON_DECL_SYCL
 #define GGML_COMMON_IMPL_SYCL
+#define FLASH_ATTN_AVAILABLE
+
 /* suppress warning spam */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wnested-anon-types"
@@ -99,6 +103,8 @@ extern int g_ggml_sycl_prioritize_dmmv;
 #ifndef GGML_SYCL_MMV_Y
 #define GGML_SYCL_MMV_Y 1
 #endif
+
+#define ggml_sycl_dp4a dpct::dp4a
 
 typedef sycl::queue *queue_ptr;
 
@@ -170,6 +176,10 @@ static size_t g_scratch_offset = 0;
 
 int get_current_device_id();
 
+inline int ggml_sycl_get_device() {
+    return get_current_device_id();
+}
+
 inline dpct::err0 ggml_sycl_set_device(const int device) try {
   int current_device_id;
   SYCL_CHECK(CHECK_TRY_ERROR(current_device_id = get_current_device_id()));
@@ -194,16 +204,19 @@ struct optimize_feature {
 };
 
 struct sycl_device_info {
-    int     cc;                 // compute capability
-    // int     nsm;                // number of streaming multiprocessors
-    // size_t  smpb;               // max. shared memory per block
-    size_t  smpbo;              // max. shared memory per block (with opt-in)
-    bool    vmm;                // virtual memory support
-    size_t  total_vram;
-    //sycl_hw_info hw_info;     \\ device id and aarch, currently not used
+    int cc;  // compute capability
+    int nsm; // number of streaming multiprocessors (CUDA) maps to the maximum
+             // number of compute units on a SYCL device.
+    // size_t  smpb;   // max. shared memory per block
+    int warp_size;     // max sub_group_size of SYCL
+    int max_wg_per_cu; // max work groups per compute unit - refer to
+                       // cudaOccupancyMaxActiveBlocksPerMultiprocessor
+    size_t smpbo; // max. shared memory per block (with opt-in)
+    bool vmm;     // virtual memory support
+    size_t total_vram;
+    // sycl_hw_info hw_info;     \\ device id and aarch, currently not used
     optimize_feature opt_feature;
 };
-
 
 struct ggml_sycl_device_info {
     int device_count;
@@ -481,6 +494,48 @@ static constexpr int ggml_sycl_get_physical_warp_size() {
 }
 
 template <int width = WARP_SIZE>
+static __dpct_inline__ int warp_reduce_all(int x) {
+    if (width == ggml_sycl_get_physical_warp_size()) {
+        return sycl::all_of_group(
+            sycl::ext::oneapi::this_work_item::get_sub_group(),
+            (~0xffffffff &
+             (0x1 << sycl::ext::oneapi::this_work_item::get_sub_group()
+                         .get_local_linear_id())) ||
+                x);
+    } else {
+#pragma unroll
+        for (int offset = width / 2; offset > 0; offset >>= 1) {
+            x = dpct::permute_sub_group_by_xor(
+                    sycl::ext::oneapi::this_work_item::get_sub_group(), x,
+                    offset, width) &&
+                x;
+        }
+        return x;
+    }
+}
+
+template <int width = WARP_SIZE>
+static __dpct_inline__ int warp_reduce_any(int x) {
+    if (width == ggml_sycl_get_physical_warp_size()) {
+        return sycl::any_of_group(
+            sycl::ext::oneapi::this_work_item::get_sub_group(),
+            (0xffffffff &
+             (0x1 << sycl::ext::oneapi::this_work_item::get_sub_group()
+                         .get_local_linear_id())) &&
+                x);
+    } else {
+#pragma unroll
+        for (int offset = width / 2; offset > 0; offset >>= 1) {
+            x = dpct::permute_sub_group_by_xor(
+                    sycl::ext::oneapi::this_work_item::get_sub_group(), x,
+                    offset, width) ||
+                x;
+        }
+        return x;
+    }
+}
+
+template <int width = WARP_SIZE>
 static __dpct_inline__ float warp_reduce_max(float x) {
 #pragma unroll
   for (int offset = width / 2; offset > 0; offset >>= 1) {
@@ -614,6 +669,176 @@ static __dpct_inline__ float get_alibi_slope(const float    max_bias,
     const int   exph = h < n_head_log2 ? h + 1 : 2*(h - n_head_log2) + 1;
 
     return dpct::pow(base, exph);
+}
+
+static bool fp16_available(const int cc) {
+    return true; //todo for xmx check
+}
+
+static bool fast_fp16_available(const int cc) {
+    return true; //todo for xmx check
+}
+
+// To be used for feature selection of external libraries, e.g. mkl.
+static bool fast_fp16_hardware_available(const int cc) {
+    return true; //todo for xmx check
+}
+
+
+// To be used for feature selection of external libraries, e.g. mkl.
+static bool fp16_mma_hardware_available(const int cc) {
+    return true; //todo for xmx check
+}
+
+static bool bf16_mma_hardware_available(const int cc) {
+    return true; //todo for xmx check
+}
+
+static bool fp32_mma_hardware_available(const int cc) {
+    return true; //todo for xmx check
+}
+
+static bool cp_async_available(const int cc) {
+    return true; //todo update for the test result.
+}
+
+// Maximum number of bytes that can be copied in a single instruction.
+static constexpr int ggml_sycl_get_max_cpy_bytes() {
+    return 16;
+}
+
+// Aligned memory transfers of 8/16 bytes can be faster than 2 transfers with 4 bytes.
+//todo check for Intel GPU.
+template <int nbytes, int alignment = 0>
+static __dpct_inline__ void ggml_sycl_memcpy_1(void * dst, const void * src) {
+    if constexpr (alignment != 0) {
+        static_assert(nbytes % alignment == 0, "bad alignment");
+    }
+    constexpr int nb_per_cpy = alignment == 0 ? nbytes : alignment;
+
+#pragma unroll
+    for (int i = 0; i < nbytes/nb_per_cpy; ++i) {
+        if constexpr (nb_per_cpy == 1) {
+            ((char *) dst)[i] = ((const char *) src)[i];
+        } else if constexpr (nb_per_cpy == 2) {
+            ((short *) dst)[i] = ((const short *) src)[i];
+        } else if constexpr (nb_per_cpy == 4) {
+            ((int *) dst)[i] = ((const int *) src)[i];
+        } else if constexpr (nb_per_cpy == 8) {
+            ((sycl::int2 *) dst)[i] = ((const sycl::int2 *) src)[i];
+        } else if constexpr (nb_per_cpy == 16) {
+            ((sycl::int4 *) dst)[i] = ((const sycl::int4 *) src)[i];
+        } else {
+            static_assert(nbytes == 0 && nbytes == -1, "bad nbytes");
+        }
+    }
+}
+
+template <typename T>
+sycl::half2 __dpct_inline__ make_half2( T x, T y) {
+  sycl::half2 res(static_cast<sycl::half>(x),static_cast<sycl::half>(y));
+  return res;
+}
+
+
+template <typename T>
+sycl::float2 __dpct_inline__ make_float2( T x, T y) {
+  sycl::float2 res(static_cast<float>(x),static_cast<float>(y));
+  return res;
+}
+
+sycl::float2 __dpct_inline__ __half22float2(sycl::half2 &H) {
+    sycl::float2 float2_value(static_cast<float>(H.x()), static_cast<float>(H.y()));
+    return float2_value;
+}
+
+sycl::float2 __dpct_inline__ __half22float2(const sycl::half2 &H) {
+    sycl::float2 float2_value(static_cast<float>(H.x()), static_cast<float>(H.y()));
+    return float2_value;
+}
+
+float __dpct_inline__ __half2float(sycl::half H) {
+    return static_cast<float>(H);
+}
+
+// float __dpct_inline__ __half2float(const sycl::half H) {
+//     return static_cast<float>(H);
+// }
+
+static __dpct_inline__ void ggml_sycl_mad(float & acc, const float v, const float u) {
+    acc += v*u;
+}
+
+static __dpct_inline__ void ggml_sycl_mad(float & acc, const sycl::float2 v, const sycl::float2 u) {
+    acc += v.x() * u.x();
+    acc += v.y() * u.y();
+}
+
+static __dpct_inline__ void ggml_sycl_mad(float & acc, const sycl::half2 v, const sycl::half2 u) {
+#ifdef FAST_FP16_AVAILABLE
+    const sycl::float2 tmp = (v * u).template convert<float, sycl::rounding_mode::automatic>();
+    acc += tmp.x() + tmp.y();
+#else
+    const sycl::float2 tmpv = __half22float2(v);
+    const sycl::float2 tmpu = __half22float2(u);
+    acc += tmpv.x() * tmpu.x();
+    acc += tmpv.y() * tmpu.y();
+#endif // FAST_FP16_AVAILABLE
+}
+
+static __dpct_inline__ void ggml_sycl_mad(sycl::half2 & acc, const sycl::half2 v, const sycl::half2 u) {
+#ifdef FAST_FP16_AVAILABLE
+    acc += v*u;
+#else
+    const sycl::float2 tmpv = __half22float2(v);
+    const sycl::float2 tmpu = __half22float2(u);
+    sycl::float2 tmpacc = __half22float2(acc);
+    // tmpacc.x += tmpv.x() * tmpu.x();
+    // tmpacc.y += tmpv.y() * tmpu.y();
+    sycl::float2 tmp1(tmpacc.x() + tmpv.x() * tmpu.x(), tmpacc.y() + tmpv.y() * tmpu.y());
+    acc = make_half2(tmp1.x(), tmp1.y());
+#endif // FAST_FP16_AVAILABLE
+}
+
+template <int n>
+struct ggml_sycl_unroll {
+    template <typename Func, typename... Args>
+    void operator()(const Func & f, Args... args) const {
+        f(n - 1, args...);
+        ggml_sycl_unroll<n - 1>{}(f, args...);
+    }
+};
+
+template <>
+struct ggml_sycl_unroll<1> {
+    template <typename Func, typename... Args>
+    void operator()(const Func & f, Args... args) const {
+        f(0, args...);
+    }
+};
+
+template <typename FuncT, typename... ArgsT>
+static void lauch_kernel(
+    dpct::dim3 group_range,
+    dpct::dim3 local_range,
+    unsigned int local_mem_size,
+    queue_ptr q,
+    ArgsT... args) {
+  syclexp::launch_config cfg{
+      sycl::nd_range<3>(
+          static_cast<sycl::range<3>>(group_range * local_range),
+          static_cast<sycl::range<3>>(local_range)),
+      syclexp::properties{
+          syclexp::work_group_scratch_size{local_mem_size * sizeof(char)}}};
+
+  sycl::context ctxt = q->get_context();
+
+  auto exe_bndl =
+      syclexp::get_kernel_bundle<FuncT, sycl::bundle_state::executable>(ctxt);
+
+  sycl::kernel k_func = exe_bndl.template ext_oneapi_get_kernel<FuncT>();
+
+  syclexp::nd_launch(*q, cfg, k_func, args...);
 }
 
 #endif // GGML_SYCL_COMMON_HPP

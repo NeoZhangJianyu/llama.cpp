@@ -85,9 +85,15 @@ static ggml_sycl_device_info ggml_sycl_init() {
 
         info.devices[i].cc =
             100 * prop.get_major_version() + 10 * prop.get_minor_version();
+        info.devices[i].nsm = prop.get_max_compute_units();
         info.devices[i].opt_feature.reorder = device.ext_oneapi_architecture_is(syclex::arch_category::intel_gpu);
-        info.max_work_group_sizes[i] = prop.get_max_work_group_size();
         info.devices[i].smpbo = prop.get_local_mem_size();
+        info.max_work_group_sizes[i] = prop.get_max_work_group_size();
+        info.devices[i].max_wg_per_cu = info.max_work_group_sizes[i] / info.devices[i].nsm;
+
+        std::vector<size_t> sub_group_sizes = device.get_info<sycl::info::device::sub_group_sizes>();
+        info.devices[i].warp_size = sub_group_sizes.back(); //last is max.
+
     }
 
     for (int id = 0; id < info.device_count; ++id) {
@@ -2730,7 +2736,7 @@ static void ggml_sycl_mul_mat_batched_sycl(ggml_backend_sycl_context & ctx, cons
 
         }
 #if GGML_SYCL_DNNL
-        // oneDNN handles strided data and does not need overhead of get_to_fp16_nc_sycl
+        // oneDNN handles strided data and does not need overhead of ggml_get_to_fp16_nc_sycl
         const int64_t ne_src1 = src1->nb[last_str] * src1->ne[last_dim] / type_size_src1;
         src1_f16_alloc.alloc(ne_src1);
         const to_fp16_sycl_t to_fp16_sycl = ggml_get_to_fp16_sycl(src1->type, dst);
@@ -2739,7 +2745,7 @@ static void ggml_sycl_mul_mat_batched_sycl(ggml_backend_sycl_context & ctx, cons
 # else
         const int64_t ne_src1 = ggml_nelements(src1);
         src1_f16_alloc.alloc(ne_src1);
-        const to_fp16_nc_sycl_t to_fp16_nc_sycl = get_to_fp16_nc_sycl(src1->type);
+        const to_fp16_nc_sycl_t to_fp16_nc_sycl = ggml_get_to_fp16_nc_sycl(src1->type);
         GGML_ASSERT(to_fp16_nc_sycl != nullptr);
         to_fp16_nc_sycl(src1_f16, src1_f16_alloc.get(), ne10, ne11, ne12, ne13, s11, s12, s13, queue);
 #endif
@@ -3775,6 +3781,10 @@ static bool ggml_sycl_compute_forward(ggml_backend_sycl_context & ctx, struct gg
         case GGML_OP_GATED_LINEAR_ATTN:
             ggml_sycl_op_gated_linear_attn(ctx, dst);
             break;
+        case GGML_OP_FLASH_ATTN_EXT:
+            ggml_sycl_flash_attn_ext(ctx, dst);
+            break;
+
         default:
             return false;
     }
@@ -4171,6 +4181,8 @@ static ggml_backend_buffer_t ggml_backend_sycl_device_buffer_from_host_ptr(ggml_
 }
 
 static bool ggml_backend_sycl_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
+    ggml_backend_sycl_device_context * dev_ctx = (ggml_backend_sycl_device_context *) dev->context;
+
     switch (op->op) {
         case GGML_OP_CONV_TRANSPOSE_1D:
             {
@@ -4421,6 +4433,8 @@ static bool ggml_backend_sycl_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_RWKV_WKV7:
         case GGML_OP_GATED_LINEAR_ATTN:
             return true;
+        case GGML_OP_FLASH_ATTN_EXT:
+            return ggml_sycl_flash_attn_ext_supported(dev_ctx->device, op);
         default:
             return false;
     }

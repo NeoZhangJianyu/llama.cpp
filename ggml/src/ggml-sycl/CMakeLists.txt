@@ -25,6 +25,27 @@ ggml_add_backend_library(ggml-sycl
 
 file(GLOB   GGML_HEADERS_SYCL "*.hpp")
 file(GLOB   GGML_SOURCES_SYCL "*.cpp")
+file(GLOB   SRCS "template-instances/fattn-mma*.cpp")
+list(APPEND GGML_SOURCES_SYCL ${SRCS})
+file(GLOB   SRCS "template-instances/mmq*.cpp")
+list(APPEND GGML_SOURCES_SYCL ${SRCS})
+file(GLOB   SRCS "template-instances/mmf*.cpp")
+list(APPEND GGML_SOURCES_SYCL ${SRCS})
+
+if (GGML_SYCL_FA_ALL_QUANTS)
+    file(GLOB   SRCS "template-instances/fattn-vec*.cpp")
+    list(APPEND GGML_SOURCES_SYCL ${SRCS})
+    add_compile_definitions(GGML_SYCL_FA_ALL_QUANTS)
+else()
+    file(GLOB   SRCS "template-instances/fattn-vec*q4_0-q4_0.cpp")
+    list(APPEND GGML_SOURCES_SYCL ${SRCS})
+    file(GLOB   SRCS "template-instances/fattn-vec*q8_0-q8_0.cpp")
+    list(APPEND GGML_SOURCES_SYCL ${SRCS})
+    file(GLOB   SRCS "template-instances/fattn-vec*f16-f16.cpp")
+    list(APPEND GGML_SOURCES_SYCL ${SRCS})
+endif()
+
+
 target_sources(ggml-sycl PRIVATE ${GGML_HEADERS_SYCL} ${GGML_SOURCES_SYCL})
 
 if (WIN32)

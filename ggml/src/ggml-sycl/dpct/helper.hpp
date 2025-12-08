@@ -16,6 +16,8 @@
 #include <sycl/sycl.hpp>
 #include <sycl/half_type.hpp>
 #include <syclcompat/math.hpp>
+// #include <syclcompat/kernel.hpp>
+
 #include <map>
 
 #ifdef GGML_SYCL_USE_INTEL_ONEMKL
@@ -295,7 +297,6 @@ namespace dpct
     return dim3{a.x * b.x, a.y * b.y, a.z * b.z};
     }
     // COPY from DPCT head files
-
 
     /// Pitched 2D/3D memory data.
     class pitched_data
@@ -2971,6 +2972,242 @@ namespace dpct
                             sycl::memory_order memoryOrder) {
     atomic_fetch_add<T1, addressSpace>(addr, operand, memoryOrder);
     }
+
+    template <int n_nondefault_params, int n_default_params, typename T>
+    class args_selector;
+
+    /// args_selector is a helper class for extracting arguments from an
+    /// array of pointers to arguments or buffer of arguments to pass to a
+    /// kernel function.
+    ///
+    /// \param R(Ts...) The type of the kernel
+    /// \param n_nondefault_params The number of nondefault parameters of the
+    /// kernel (excluding parameters that like sycl::nd_item, etc.) \param
+    /// n_default_params The number of default parameters of the kernel
+    ///
+    /// Example usage:
+    /// With the following kernel:
+    ///   void foo(sycl::float2 *x, int n, sycl::nd_item<3> item_ct1, float
+    ///   f=.1) {}
+    /// and with the declaration:
+    ///   args_selector<2, 1, decltype(foo)> selector(kernelParams, extra);
+    /// we have:
+    ///   selector.get<0>() returns a reference to sycl::float*,
+    ///   selector.get<1>() returns a reference to int,
+    ///   selector.get<2>() returns a reference to float
+    template <int n_nondefault_params, int n_default_params, typename R,
+              typename... Ts>
+    class args_selector<n_nondefault_params, n_default_params, R(Ts...)> {
+      private:
+        void **kernel_params;
+        char *args_buffer;
+
+        template <int i> static constexpr int account_for_default_params() {
+            constexpr int n_total_params = sizeof...(Ts);
+            if constexpr (i >= n_nondefault_params) {
+                return n_total_params - n_default_params +
+                       (i - n_nondefault_params);
+            } else {
+                return i;
+            }
+        }
+
+      public:
+        /// Get the type of the ith argument of R(Ts...)
+        /// \param [in] i Index of parameter to get
+        /// \returns Type of ith parameter
+        template <int i>
+        using arg_type = std::tuple_element_t<account_for_default_params<i>(),
+                                              std::tuple<Ts...>>;
+        static constexpr int params_num = sizeof...(Ts);
+
+      private:
+        template <int i> static constexpr int get_offset() {
+            if constexpr (i == 0) {
+                // we can assume args_buffer is properly aligned to the
+                // first argument
+                return 0;
+            } else {
+                constexpr int prev_off = get_offset<i - 1>();
+                constexpr int prev_past_end =
+                    prev_off + sizeof(arg_type<i - 1>);
+                using T = arg_type<i>;
+                // is the past-the-end of the i-1st element properly aligned
+                // with the ith element's alignment?
+                if constexpr (prev_past_end % alignof(T) == 0) {
+                    return prev_past_end;
+                }
+                // otherwise bump prev_past_end to match alignment
+                else {
+                    return prev_past_end +
+                           (alignof(T) - (prev_past_end % alignof(T)));
+                }
+            }
+        }
+
+        static char *get_args_buffer(void **extra) {
+            if (!extra)
+                return nullptr;
+            for (; (std::size_t)*extra != 0; ++extra) {
+                if ((std::size_t)*extra == 1) {
+                    return static_cast<char *>(*(extra + 1));
+                }
+            }
+            return nullptr;
+        }
+
+      public:
+        /// If kernel_params is nonnull, then args_selector will
+        /// extract arguments from kernel_params. Otherwise, it
+        /// will extract them from extra.
+        /// \param [in] kernel_params Array of pointers to arguments
+        /// a or null pointer.
+        /// \param [in] extra Array containing pointer to argument buffer.
+        args_selector(void **kernel_params, void **extra)
+            : kernel_params(kernel_params),
+              args_buffer(get_args_buffer(extra)) {}
+
+        /// Get a reference to the ith argument extracted from kernel_params
+        /// or extra.
+        /// \param [in] i Index of argument to get
+        /// \returns Reference to the ith argument
+        template <int i> arg_type<i> &get() {
+            if (kernel_params) {
+                return *static_cast<arg_type<i> *>(kernel_params[i]);
+            } else {
+                return *reinterpret_cast<arg_type<i> *>(args_buffer +
+                                                        get_offset<i>());
+            }
+        }
+    }; // COPY from DPCT head file
+       // /opt/intel/oneapi/dpcpp-ct/latest/include/dpct/util.hpp
+
+    /// Utility class for launching SYCL kernels through kernel
+    /// function wrapper.
+    /// For example:
+    /// A SYCL kernel function:
+    ///   void kernel_func(int *ptr, sycl::nd_item<3> item);
+    /// Kernel function wrapper:
+    ///   void kernel_func_wrapper(int *ptr) {
+    ///     sycl::queue queue = *dpct::kernel_launcher::_que;
+    ///     unsigned int localMemSize = dpct::kernel_launcher::_local_mem_size;
+    ///     sycl::nd_range<3> nr = dpct::kernel_launcher::_nr;
+    ///     queue.parallel_for(
+    ///       nr,
+    ///       [=](sycl::nd_item<3> item_ct1) {
+    ///         kernel_func(ptr, item_ct1);
+    ///       });
+    ///   }
+    /// Then launch the kernel through wrapper like:
+    ///   typedef void(*fpt)(int *);
+    ///   fpt fp = kernel_func_wrapper;
+    ///   dpct::kernel_launcher::launch(fp, dpct::dim3(1), dpct::dim3(1), 0, 0,
+    ///   device_ptr);
+    /// If the origin function type is erased, then need to register it first:
+    ///   void *fp = (void *)wrapper_register(&kernel_func_wrapper).get();
+    ///   dpct::kernel_launcher::launch(fp, dpct::dim3(1), dpct::dim3(1), args,
+    ///   0, 0);
+    class kernel_launcher {
+        template <typename FuncT, typename ArgSelector, std::size_t... Index>
+        static void launch_helper(FuncT &&func, ArgSelector &selector,
+                                  std::index_sequence<Index...>) {
+            func(selector.template get<Index>()...);
+        }
+        static void set_execution_config(dim3 group_range, dim3 local_range,
+                                         unsigned int local_mem_size,
+                                         queue_ptr que) {
+            if (que) {
+                _que = que;
+            } else {
+                _que = &get_default_queue();
+            }
+            _nr = sycl::nd_range<3>(
+                static_cast<sycl::range<3>>(group_range * local_range),
+                static_cast<sycl::range<3>>(local_range));
+            _local_mem_size = local_mem_size;
+
+
+        };
+        static inline std::mutex kernel_function_ptr_map_mutex;
+
+      public:
+        /// Variables for storing execution configuration.
+        static inline thread_local sycl::queue *_que = nullptr;
+        static inline thread_local sycl::nd_range<3> _nr = sycl::nd_range<3>();
+        static inline thread_local unsigned int _local_mem_size = 0;
+        /// Map for retrieving launchable functor from a raw pointer.
+        static inline std::map<
+            const void *,
+            std::function<void(dim3, dim3, void **, unsigned int, queue_ptr)>>
+            kernel_function_ptr_map = {};
+
+        /// Registers a kernel function pointer with a corresponding launchable
+        /// functor.
+        /// \param [in] func Pointer to the kernel function.
+        /// \param [in] launcher Functor to handle kernel invocation.
+        static void register_kernel_ptr(
+            const void *func,
+            std::function<void(dim3, dim3, void **, unsigned int, queue_ptr)>
+                launcher) {
+            std::lock_guard<std::mutex> lock(kernel_function_ptr_map_mutex);
+            kernel_function_ptr_map[func] = std::move(launcher);
+        }
+        /// Launches a kernel function with arguments provided directly through
+        /// kernel function wrapper.
+        /// \tparam FuncT Type of the kernel function wrapper.
+        /// \tparam ArgsT Types of kernel arguments.
+        /// \param [in] func Pointer to the kernel function wrapper.
+        /// \param [in] group_range SYCL group range.
+        /// \param [in] local_range SYCL local range.
+        /// \param [in] local_mem_size The size of local memory required by the
+        /// kernel function. \param [in] que SYCL queue used to execute kernel.
+        /// \param [in] args Kernel arguments.
+        template <typename FuncT, typename... ArgsT>
+        static std::enable_if_t<std::is_invocable_v<FuncT *, ArgsT...>, void>
+        launch(FuncT *func, dim3 group_range, dim3 local_range,
+               unsigned int local_mem_size, queue_ptr que, ArgsT... args) {
+            set_execution_config(group_range, local_range, local_mem_size, que);
+            func(args...);
+        }
+        /// Launches a kernel function through registered kernel function
+        /// wrapper. \param [in] func Pointer to the registered kernel function
+        /// wrapper. \param [in] group_range SYCL group range. \param [in]
+        /// local_range SYCL local range. \param [in] args Array of pointers to
+        /// kernel arguments. \param [in] local_mem_size The size of local
+        /// memory required by the kernel function. \param [in] que SYCL queue
+        /// used to execute kernel.
+        static void launch(const void *func, dim3 group_range, dim3 local_range,
+                           void **args, unsigned int local_mem_size,
+                           queue_ptr que) {
+            std::lock_guard<std::mutex> lock(kernel_function_ptr_map_mutex);
+            auto Iter = kernel_function_ptr_map.find(func);
+            if (Iter == kernel_function_ptr_map.end()) {
+                throw std::runtime_error("dpct::launch() : no registered "
+                                         "kernel function wrapper found.");
+            }
+            (Iter->second)(group_range, local_range, args, local_mem_size, que);
+        }
+        /// Launches a kernel function with packed arguments through kernel
+        /// function wrapper.
+        /// \tparam FuncT Type of the kernel function wrapper.
+        /// \param [in] func Pointer to the kernel function wrapper.
+        /// \param [in] group_range SYCL group range.
+        /// \param [in] local_range SYCL local range.
+        /// \param [in] args Array of pointers to kernel arguments.
+        /// \param [in] local_mem_size The size of local memory required by the
+        /// kernel function. \param [in] que SYCL queue used to execute kernel.
+        template <typename FuncT>
+        static std::enable_if_t<std::is_function_v<FuncT>, void>
+        launch(FuncT *func, dim3 group_range, dim3 local_range, void **args,
+               unsigned int local_mem_size, queue_ptr que) {
+            constexpr size_t p_num = args_selector<0, 0, FuncT>::params_num;
+            set_execution_config(group_range, local_range, local_mem_size, que);
+            args_selector<p_num, p_num, FuncT> selector(args, nullptr);
+            launch_helper(func, selector, std::make_index_sequence<p_num>{});
+        }
+    }; // COPY from DPCT head file
+       // /opt/intel/oneapi/dpcpp-ct/latest/include/dpct/kernel.hpp
+
 
 } // COPY from DPCT head files
 
