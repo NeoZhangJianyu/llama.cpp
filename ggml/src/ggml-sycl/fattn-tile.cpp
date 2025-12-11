@@ -710,36 +710,38 @@ static void launch_fattn_tile_switch_ncols(ggml_backend_sycl_context & ctx, ggml
 
     constexpr size_t nbytes_shared = 0;
 
-#ifdef GGML_USE_HIP
-    if constexpr (D <= 128) {
-        if (Q->ne[1] > 32) {
-            constexpr int cols_per_block = 64;
-            const int nwarps = fattn_tile_get_nthreads_host(cc, cols_per_block) / warp_size;
-            fattn_kernel_t fattn_kernel = flash_attn_tile<D, cols_per_block, use_logit_softcap>;
-            const int kq_stride = fattn_tile_get_kq_stride_host(D, cols_per_block, cc, warp_size);
-            launch_fattn<D, cols_per_block, 1>
-                (ctx, dst, fattn_kernel, nwarps, nbytes_shared, kq_stride, true, true, false, warp_size);
-            return;
-        }
-    }
-#endif // GGML_USE_HIP
-
     if (Q->ne[1] > 16) {
         constexpr int cols_per_block = 32;
         const int nwarps = fattn_tile_get_nthreads_host(cc, cols_per_block) / warp_size;
-        fattn_kernel_t fattn_kernel   = flash_attn_tile<D, cols_per_block, use_logit_softcap>;
+        // fattn_kernel_t fattn_kernel   = flash_attn_tile<D, cols_per_block, use_logit_softcap>;
+        sycl::kernel fattn_kernel = get_sycl_free_ker<
+            flash_attn_tile<D, cols_per_block, use_logit_softcap>>(
+            *ctx.stream());
         const int kq_stride = fattn_tile_get_kq_stride_host(D, cols_per_block, cc, warp_size);
-        launch_fattn<D, cols_per_block, 1>
-            (ctx, dst, fattn_kernel, nwarps, nbytes_shared, kq_stride, true, true, false, warp_size);
+        launch_fattn<D, cols_per_block, 1>(
+            fattn_kernel,
+            ctx,
+            dst,
+            nwarps,
+            nbytes_shared,
+            kq_stride,
+            true,
+            true,
+            false,
+            warp_size);
         return;
     }
 
     constexpr int cols_per_block = 16;
     const int nwarps = fattn_tile_get_nthreads_host(cc, cols_per_block) / warp_size;
-    fattn_kernel_t fattn_kernel   = flash_attn_tile<D, cols_per_block, use_logit_softcap>;
+    // fattn_kernel_t fattn_kernel   = flash_attn_tile<D, cols_per_block, use_logit_softcap>;
+    sycl::kernel fattn_kernel = get_sycl_free_ker<
+            flash_attn_tile<D, cols_per_block, use_logit_softcap>>(
+            *ctx.stream());
+
     const int kq_stride = fattn_tile_get_kq_stride_host(D, cols_per_block, cc, warp_size);
     launch_fattn<D, cols_per_block, 1>
-        (ctx, dst, fattn_kernel, nwarps, nbytes_shared, kq_stride, true, true, false, warp_size);
+        (fattn_kernel, ctx, dst, nwarps, nbytes_shared, kq_stride, true, true, false, warp_size);
 }
 
 template <bool use_logit_softcap>

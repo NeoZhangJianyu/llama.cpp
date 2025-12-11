@@ -552,17 +552,55 @@ void ggml_sycl_flash_attn_ext_wmma_f16_case(ggml_backend_sycl_context & ctx, ggm
     float logit_softcap;
     memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
 
-    fattn_kernel_t fattn_kernel;
+    // fattn_kernel_t fattn_kernel;
     if (logit_softcap == 0.0f) {
-        constexpr bool use_logit_softcap = false;
-        fattn_kernel = flash_attn_ext_f16<D, cols_per_block, nwarps, get_VKQ_stride(D, nwarps, frag_m),
-                                                  KQ_acc_t, use_logit_softcap>;
+      constexpr bool use_logit_softcap = false;
+      // fattn_kernel = flash_attn_ext_f16<D, cols_per_block, nwarps,
+      // get_VKQ_stride(D, nwarps, frag_m),
+      //                                           KQ_acc_t, false>;
+      sycl::kernel fattn_kernel = get_sycl_free_ker<flash_attn_ext_f16<
+          D,
+          cols_per_block,
+          nwarps,
+          get_VKQ_stride(D, nwarps, frag_m),
+          KQ_acc_t,
+          false>>(*ctx.stream());
+      launch_fattn<D, cols_per_block, 1>(
+          fattn_kernel,
+          ctx,
+          dst,
+          nwarps,
+          0,
+          FATTN_KQ_STRIDE,
+          true,
+          true,
+          false,
+          warp_size);
+
     } else {
-        constexpr bool use_logit_softcap = true;
-        fattn_kernel = flash_attn_ext_f16<D, cols_per_block, nwarps, get_VKQ_stride(D, nwarps, frag_m),
-                                                  KQ_acc_t, use_logit_softcap>;
+      constexpr bool use_logit_softcap = true;
+      // fattn_kernel = flash_attn_ext_f16<D, cols_per_block, nwarps,
+      // get_VKQ_stride(D, nwarps, frag_m),
+      //                                           KQ_acc_t, use_logit_softcap>;
+      sycl::kernel fattn_kernel = get_sycl_free_ker<flash_attn_ext_f16<
+          D,
+          cols_per_block,
+          nwarps,
+          get_VKQ_stride(D, nwarps, frag_m),
+          KQ_acc_t,
+          true>>(*ctx.stream());
+      launch_fattn<D, cols_per_block, 1>(
+          fattn_kernel,
+          ctx,
+          dst,
+          nwarps,
+          0,
+          FATTN_KQ_STRIDE,
+          true,
+          true,
+          false,
+          warp_size);
     }
-    launch_fattn<D, cols_per_block, 1>(ctx, dst, fattn_kernel, nwarps, 0, FATTN_KQ_STRIDE, true, true, false, warp_size);
 }
 
 void ggml_sycl_flash_attn_ext_wmma_f16(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {

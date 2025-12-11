@@ -817,12 +817,22 @@ struct ggml_sycl_unroll<1> {
     }
 };
 
-template <typename FuncT, typename... ArgsT>
+template <auto* kptr>
+sycl::kernel get_sycl_free_ker(sycl::queue& q) {
+  sycl::context ctxt = q.get_context();
+  auto exe_bndl =
+      syclexp::get_kernel_bundle<kptr, sycl::bundle_state::executable>(ctxt);
+  sycl::kernel ker = exe_bndl.template ext_oneapi_get_kernel<kptr>();
+  return ker;
+}
+
+template <typename... ArgsT>
 static void lauch_kernel(
     dpct::dim3 group_range,
     dpct::dim3 local_range,
-    unsigned int local_mem_size,
     queue_ptr q,
+    sycl::kernel& ker,
+    unsigned int local_mem_size,
     ArgsT... args) {
   syclexp::launch_config cfg{
       sycl::nd_range<3>(
@@ -831,14 +841,7 @@ static void lauch_kernel(
       syclexp::properties{
           syclexp::work_group_scratch_size{local_mem_size * sizeof(char)}}};
 
-  sycl::context ctxt = q->get_context();
-
-  auto exe_bndl =
-      syclexp::get_kernel_bundle<FuncT, sycl::bundle_state::executable>(ctxt);
-
-  sycl::kernel k_func = exe_bndl.template ext_oneapi_get_kernel<FuncT>();
-
-  syclexp::nd_launch(*q, cfg, k_func, args...);
+  syclexp::nd_launch(*q, cfg, ker, args...);
 }
 
 #endif // GGML_SYCL_COMMON_HPP

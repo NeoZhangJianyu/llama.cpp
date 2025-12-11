@@ -148,8 +148,11 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
 
     syclex::work_group_static<char[local_share_mem_size]> lsm;
 
-    float (*KQ_max_shared)[ncols][WARP_SIZE] = (float (*)[ncols][WARP_SIZE])&lsm;
-    float (*KQ_sum_shared)[ncols][WARP_SIZE] = (float (*)[ncols][WARP_SIZE])(&lsm+lsm_size1);
+    // char *lsm = static_cast<char *>(syclex::get_work_group_scratch_memory());
+
+
+    float (*KQ_max_shared)[WARP_SIZE] = (float (*)[WARP_SIZE])&lsm;
+    float (*KQ_sum_shared)[WARP_SIZE] = (float (*)[WARP_SIZE])(&lsm+lsm_size1);
     sycl::half* KQ = (sycl::half*)(&lsm + lsm_size1 + lsm_size2);
 
 #else
@@ -159,9 +162,10 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
     constexpr size_t local_share_mem_size = lsm_size1 + lsm_size2 + lsm_size3;
 
     syclex::work_group_static<char[local_share_mem_size]> lsm;
+    // char *lsm = static_cast<char *>(syclex::get_work_group_scratch_memory());
 
-    float (*KQ_max_shared)[ncols][WARP_SIZE] = (float (*)[ncols][WARP_SIZE])&lsm;
-    float (*KQ_sum_shared)[ncols][WARP_SIZE] = (float (*)[ncols][WARP_SIZE])(&lsm+lsm_size1);
+    float (*KQ_max_shared)[WARP_SIZE] = (float (*)[WARP_SIZE])&lsm;
+    float (*KQ_sum_shared)[WARP_SIZE] = (float (*)[WARP_SIZE])(&lsm+lsm_size1);
     float* KQ = (float*)(&lsm + lsm_size1 + lsm_size2);
 
 #endif // FAST_FP16_AVAILABLE
@@ -593,11 +597,19 @@ void ggml_sycl_flash_attn_ext_vec_case_impl(ggml_backend_sycl_context & ctx, ggm
 
     const int nthreads = ggml_sycl_fattn_vec_get_nthreads_host(cc);
     const int nwarps   = nthreads / WARP_SIZE;
-    fattn_kernel_t   fattn_kernel  = flash_attn_ext_vec<D, cols_per_block, type_K, type_V, use_logit_softcap>;
+    // fattn_kernel_t   fattn_kernel  = flash_attn_ext_vec<D, cols_per_block, type_K, type_V, use_logit_softcap>;
+
+    sycl::kernel fattn_kernel = get_sycl_free_ker<flash_attn_ext_vec<
+        D,
+        cols_per_block,
+        type_K,
+        type_V,
+        use_logit_softcap>>(*ctx.stream());
+
     constexpr bool need_f16_K = false;
     constexpr bool need_f16_V = false;
     constexpr size_t nbytes_shared = 0;
-    launch_fattn<D, cols_per_block, 1, fattn_kernel>(ctx, dst, nwarps, nbytes_shared, D, need_f16_K, need_f16_V, false);
+    launch_fattn<D, cols_per_block, 1>(fattn_kernel, ctx, dst, nwarps, nbytes_shared, D, need_f16_K, need_f16_V, false);
 }
 
 template <int D, ggml_type type_K, ggml_type type_V>

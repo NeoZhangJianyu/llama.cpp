@@ -1553,6 +1553,13 @@ static void flash_attn_ext_f16(const char * __restrict__ Q,
 #endif // defined(FLASH_ATTN_AVAILABLE) && defined(TURING_MMA_AVAILABLE)
 }
 
+template <int DKQ, int DV, int ncols1, int ncols2, int nwarps, int ntiles, bool use_logit_softcap, bool mla>
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<3>))
+void my_ker(const char *  Q) {
+
+}
+
+
 template <int DKQ, int DV, int ncols1, int ncols2>
 void ggml_sycl_flash_attn_ext_mma_f16_case(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * KQV = dst;
@@ -1595,17 +1602,70 @@ void ggml_sycl_flash_attn_ext_mma_f16_case(ggml_backend_sycl_context & ctx, ggml
     float logit_softcap;
     memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
 
-    fattn_kernel_t fattn_kernel;
+    // fattn_kernel_t fattn_kernel;
+    sycl::kernel *fattn_kernel;
+
+    sycl::queue q;
+    constexpr int a = 1;
+    constexpr bool b=true;
+
     if (logit_softcap == 0.0f) {
-        constexpr bool use_logit_softcap = false;
-        fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, nwarps, ntiles, use_logit_softcap, mla>;
+      // use_logit_softcap = false;
+      // fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, nwarps,
+      // ntiles, use_logit_softcap, mla>;
+      sycl::kernel fattn_kernel =
+          get_sycl_free_ker<my_ker<DKQ, DV, ncols1, ncols2, nwarps, ntiles, false, mla>>(
+              *ctx.stream());
+      launch_fattn<DV, ncols1, ncols2>(
+          fattn_kernel,
+          ctx,
+          dst,
+          nwarps,
+          nbytes_shared_total,
+          FATTN_KQ_STRIDE,
+          true,
+          true,
+          true);
+
     } else {
-        constexpr bool use_logit_softcap = true;
-        fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, nwarps, ntiles, use_logit_softcap, mla>;
+      // use_logit_softcap = true;
+      // fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, nwarps,
+      // ntiles, use_logit_softcap, mla>;
+      sycl::kernel fattn_kernel =
+          get_sycl_free_ker<my_ker<DKQ, DV, ncols1, ncols2, nwarps, ntiles, true, mla>>(
+              *ctx.stream());
+      launch_fattn<DV, ncols1, ncols2>(
+          fattn_kernel,
+          ctx,
+          dst,
+          nwarps,
+          nbytes_shared_total,
+          FATTN_KQ_STRIDE,
+          true,
+          true,
+          true);
     }
 
-    launch_fattn<DV, ncols1, ncols2, fattn_kernel>
-        (ctx, dst, nwarps, nbytes_shared_total, FATTN_KQ_STRIDE, true, true, true);
+    // sycl::kernel fattn_kernel = get_sycl_free_ker<my_ker<
+    //     a,
+    //     a,
+    //     a,
+    //     a,
+    //     nwarps,
+    //     ntiles,
+    //     use_logit_softcap,
+    //     mla>>(*ctx.stream());
+    // sycl::kernel fattn_kernel = get_sycl_free_ker<flash_attn_ext_f16<
+    //     (int)DKQ,
+    //     (int)DV,
+    //     (int)ncols1,
+    //     (int)ncols2,
+    //     (int)nwarps,
+    //     (int)ntiles,
+    //     (bool)use_logit_softcap,
+    //     (bool)mla>>(*ctx.stream());
+
+
 }
 
 
