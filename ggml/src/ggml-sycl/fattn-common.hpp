@@ -6,6 +6,8 @@
 #include "convert.hpp"
 #include "vecdotq.hpp"
 
+#include "ggml.h"
+
 #include <cstdint>
 #include <cmath>
 
@@ -565,7 +567,7 @@ static __dpct_inline__ void dequantize_V_q8_0(const void * __restrict__ vx, void
     }
 }
 
-template <ggml_type type_K, int D, int nthreads>
+template <int type_K, int D, int nthreads>
 constexpr vec_dot_KQ_t get_vec_dot_KQ() {
     if constexpr (type_K == GGML_TYPE_F16) {
         return vec_dot_fattn_vec_KQ_f16<D, nthreads>;
@@ -585,7 +587,7 @@ constexpr vec_dot_KQ_t get_vec_dot_KQ() {
     }
 }
 
-template <ggml_type type_V, typename T, int ne>
+template <int type_V, typename T, int ne>
 constexpr dequantize_V_t get_dequantize_V() {
     if constexpr (type_V == GGML_TYPE_F16) {
         return dequantize_V_f16<T, ne>;

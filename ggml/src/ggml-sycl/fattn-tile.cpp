@@ -106,11 +106,8 @@ static constexpr int fattn_tile_get_occupancy_device(int ncols) {
 }
 
 template <int D, int ncols, bool use_logit_softcap>  // D == head size
-/*
-DPCT1110:35: The total declared local variable size in device function flash_attn_tile exceeds 128 bytes and may cause high register pressure. Consult with your hardware vendor to find the total register size available and adjust the code, or use smaller sub-group size to avoid high register pressure.
-*/
-
-static void flash_attn_tile(const char *  Q,
+SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<3>))
+void flash_attn_tile(const char *  Q,
                             const char *  K,
                             const char *  V,
                             const char *  mask,

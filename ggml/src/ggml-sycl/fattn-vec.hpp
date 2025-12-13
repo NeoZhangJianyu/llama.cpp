@@ -2,9 +2,12 @@
 #include <sycl/ext/oneapi/work_group_static.hpp>
 #include "dpct/helper.hpp"
 #include "common.hpp"
+#include "ggml.h"
 #include "fattn-common.hpp"
 #include <cmath>
 #include <float.h>
+
+ggml_type type_K;
 
 namespace syclex = sycl::ext::oneapi::experimental;
 
@@ -23,9 +26,9 @@ static constexpr int ggml_sycl_fattn_vec_get_nthreads_device() {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wpass-failed"
 #endif // __clang__
-template <int D, int ncols, ggml_type type_K, ggml_type type_V, bool use_logit_softcap>  // D == head size
+template <int D, int ncols, int type_K, int type_V, bool use_logit_softcap>  // D == head size
 SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<3>))
-static void flash_attn_ext_vec(const char * __restrict__ Q,
+void flash_attn_ext_vec(const char * __restrict__ Q,
                                const char * __restrict__ K,
                                const char * __restrict__ V,
                                const char * __restrict__ mask,
@@ -100,11 +103,11 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
     constexpr int nthreads_KQ = type_K == GGML_TYPE_F16 ? 128 / cpy_nb : nthreads_KQ_q;
     constexpr int nthreads_V  = type_V == GGML_TYPE_F16 ? 128 / cpy_nb : nthreads_V_q;
 
-    static_assert(WARP_SIZE % nthreads_KQ == 0, "bad nthreads_K");
-    static_assert(WARP_SIZE % nthreads_V  == 0, "bad nthreads_V");
+    static_assert(WARP_32_SIZE % nthreads_KQ == 0, "bad nthreads_K");
+    static_assert(WARP_32_SIZE % nthreads_V  == 0, "bad nthreads_V");
 
     constexpr int V_rows_per_thread = type_V == GGML_TYPE_F16 ? 2*cpy_ne : 4;
-    constexpr int V_cols_per_iter   = WARP_SIZE / nthreads_V;
+    constexpr int V_cols_per_iter   = WARP_32_SIZE / nthreads_V;
 
     constexpr vec_dot_KQ_t vec_dot_KQ = get_vec_dot_KQ<type_K, D, nthreads_KQ>();
     constexpr bool Q_q8_1 = type_K != GGML_TYPE_F16;
@@ -127,18 +130,18 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
 
     const float slope = get_alibi_slope(max_bias, head, n_head_log2, m0, m1);
 
-    static_assert(D % (2*WARP_SIZE) == 0, "D not divisible by 2*WARP_SIZE == 64.");
-    constexpr int nwarps = nthreads / WARP_SIZE;
-    const int     tid    = WARP_SIZE * item_ct1.get_local_id(1) + item_ct1.get_local_id(2);
+    static_assert(D % (2*WARP_32_SIZE) == 0, "D not divisible by 2*WARP_32_SIZE == 64.");
+    constexpr int nwarps = nthreads / WARP_32_SIZE;
+    const int     tid    = WARP_32_SIZE * item_ct1.get_local_id(1) + item_ct1.get_local_id(2);
     __builtin_assume(tid < nthreads);
 
     constexpr int ne_KQ      = ncols*D;
     constexpr int ne_combine = nwarps*V_cols_per_iter*D;
 
-    // __shared__ float KQ_max_shared[ncols][WARP_SIZE];
-    // __shared__ float KQ_sum_shared[ncols][WARP_SIZE];
-    constexpr size_t lsm_size1 = ncols * WARP_SIZE*sizeof(float);
-    constexpr size_t lsm_size2 = ncols * WARP_SIZE*sizeof(float);
+    // __shared__ float KQ_max_shared[ncols][WARP_32_SIZE];
+    // __shared__ float KQ_sum_shared[ncols][WARP_32_SIZE];
+    constexpr size_t lsm_size1 = ncols * WARP_32_SIZE*sizeof(float);
+    constexpr size_t lsm_size2 = ncols * WARP_32_SIZE*sizeof(float);
 
 #ifdef FAST_FP16_AVAILABLE
     sycl::half2 VKQ[ncols][(D / 2) / nthreads_V] = { { { 0.0f, 0.0f } } };
@@ -151,8 +154,8 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
     // char *lsm = static_cast<char *>(syclex::get_work_group_scratch_memory());
 
 
-    float (*KQ_max_shared)[WARP_SIZE] = (float (*)[WARP_SIZE])&lsm;
-    float (*KQ_sum_shared)[WARP_SIZE] = (float (*)[WARP_SIZE])(&lsm+lsm_size1);
+    float (*KQ_max_shared)[WARP_32_SIZE] = (float (*)[WARP_32_SIZE])&lsm;
+    float (*KQ_sum_shared)[WARP_32_SIZE] = (float (*)[WARP_32_SIZE])(&lsm+lsm_size1);
     sycl::half* KQ = (sycl::half*)(&lsm + lsm_size1 + lsm_size2);
 
 #else
@@ -164,8 +167,8 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
     syclex::work_group_static<char[local_share_mem_size]> lsm;
     // char *lsm = static_cast<char *>(syclex::get_work_group_scratch_memory());
 
-    float (*KQ_max_shared)[WARP_SIZE] = (float (*)[WARP_SIZE])&lsm;
-    float (*KQ_sum_shared)[WARP_SIZE] = (float (*)[WARP_SIZE])(&lsm+lsm_size1);
+    float (*KQ_max_shared)[WARP_32_SIZE] = (float (*)[WARP_32_SIZE])&lsm;
+    float (*KQ_sum_shared)[WARP_32_SIZE] = (float (*)[WARP_32_SIZE])(&lsm+lsm_size1);
     float* KQ = (float*)(&lsm + lsm_size1 + lsm_size2);
 
 #endif // FAST_FP16_AVAILABLE
@@ -202,10 +205,10 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
             // Set memory to zero if out of bounds:
             if (ncols > 1 && ic0 + j >= ne01) {
 #pragma unroll
-                for (int i0 = 0; i0 < int(D/sizeof(int)); i0 += WARP_SIZE) {
+                for (int i0 = 0; i0 < int(D/sizeof(int)); i0 += WARP_32_SIZE) {
                     const int i = i0 + item_ct1.get_local_id(2);
 
-                    if (i0 + WARP_SIZE <= D/sizeof(int) || i < D/sizeof(int)) {
+                    if (i0 + WARP_32_SIZE <= D/sizeof(int) || i < D/sizeof(int)) {
                         tmp_q_i32[i] = 0;
                     }
                 }
@@ -214,7 +217,7 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
                 }
             } else {
                 const float * Q_f = (const float *) (Q + j*nb01);
-                constexpr int nthreads_quantize = D/sizeof(int) < WARP_SIZE ? D/sizeof(int) : WARP_SIZE;
+                constexpr int nthreads_quantize = D/sizeof(int) < WARP_32_SIZE ? D/sizeof(int) : WARP_32_SIZE;
 #pragma unroll
                 for (int i0 = 0; i0 < int(D/sizeof(int)); i0 += nthreads_quantize) {
                     quantize_q8_1_to_shared<sycl::float2, nthreads_quantize>
@@ -233,7 +236,7 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
 #pragma unroll
             for (int i0 = 0; i0 < int(D/sizeof(int)); i0 += nthreads_KQ) {
                 const int i =
-                    i0 + (nthreads_KQ == WARP_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads_KQ);
+                    i0 + (nthreads_KQ == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads_KQ);
 
                 Q_i32[j][i0/nthreads_KQ] = tmp_q_i32[i];
                 Q_ds[j][i0/nthreads_KQ]  = tmp_q_ds[i/QI8_1];
@@ -249,7 +252,7 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
             const sycl::float2 * Q_j = (const sycl::float2 *) (Q + j * nb01);
 #pragma unroll
             for (int i0 = 0; i0 < D/2; i0 += nthreads_KQ*cpy_ne) {
-                const int i = i0 + (nthreads_KQ == WARP_SIZE ? item_ct1.get_local_id(2) :
+                const int i = i0 + (nthreads_KQ == WARP_32_SIZE ? item_ct1.get_local_id(2) :
                                                                item_ct1.get_local_id(2) % nthreads_KQ) *
                                        cpy_ne;
 
@@ -276,7 +279,7 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
             const sycl::float2 * Q_j = (const sycl::float2 *) (Q + j*nb01);
 #pragma unroll
             for (int i0 = 0; i0 < D/2; i0 += nthreads_KQ*cpy_ne) {
-                const int i = i0 + (nthreads_KQ == WARP_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads_KQ)*cpy_ne;
+                const int i = i0 + (nthreads_KQ == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads_KQ)*cpy_ne;
                 if (ncols == 1 || ic0 + j < ne01) {
                     ggml_sycl_memcpy_1<cpy_nb>(&Q_reg[j][i0/nthreads_KQ],            &Q_j[i]);
                     ggml_sycl_memcpy_1<cpy_nb>(&Q_reg[j][i0/nthreads_KQ + cpy_ne/2], &Q_j[i + cpy_ne/2]);
@@ -311,8 +314,8 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
 
 #pragma unroll
         for (int i_KQ_0 = 0; i_KQ_0 < nthreads_KQ; ++i_KQ_0) {
-            const int i_KQ = item_ct1.get_local_id(1) * WARP_SIZE +
-                             (nthreads_KQ == WARP_SIZE ? 0 : (item_ct1.get_local_id(2) & ~(nthreads_KQ - 1))) + i_KQ_0;
+            const int i_KQ = item_ct1.get_local_id(1) * WARP_32_SIZE +
+                             (nthreads_KQ == WARP_32_SIZE ? 0 : (item_ct1.get_local_id(2) & ~(nthreads_KQ - 1))) + i_KQ_0;
 
 #pragma unroll
             for (int j = 0; j < ncols; ++j) {
@@ -330,7 +333,7 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
 
                 KQ_max_new[j] = sycl::fmax((float) KQ_max_new[j], sum);
 
-                if ((nthreads_KQ == WARP_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads_KQ) ==
+                if ((nthreads_KQ == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads_KQ) ==
                     i_KQ_0) {
                     KQ_reg[j] = sum;
                 }
@@ -340,7 +343,7 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
 #pragma unroll
         for (int j = 0; j < ncols; ++j) {
 #pragma unroll
-            for (int offset = nthreads_KQ; offset < WARP_SIZE; offset <<= 1) {
+            for (int offset = nthreads_KQ; offset < WARP_32_SIZE; offset <<= 1) {
                 KQ_max_new[j] =
                     sycl::fmax((float) KQ_max_new[j],
                                (float) dpct::permute_sub_group_by_xor(
@@ -373,9 +376,9 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
 #endif // GGML_USE_HIP
 
 #pragma unroll
-        for (int k0 = 0; k0 < WARP_SIZE; k0 += V_cols_per_iter) {
-            const int k = item_ct1.get_local_id(1) * WARP_SIZE + k0 +
-                          (nthreads_V == WARP_SIZE ? 0 : item_ct1.get_local_id(2) / nthreads_V);
+        for (int k0 = 0; k0 < WARP_32_SIZE; k0 += V_cols_per_iter) {
+            const int k = item_ct1.get_local_id(1) * WARP_32_SIZE + k0 +
+                          (nthreads_V == WARP_32_SIZE ? 0 : item_ct1.get_local_id(2) / nthreads_V);
 
 #ifdef FAST_FP16_AVAILABLE
             sycl::half2 KQ_k[ncols];
@@ -387,7 +390,7 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
             for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
                 sycl::half2 tmp[V_rows_per_thread / 2];
                 dequantize_V(V + k * nb21, tmp,
-                             2 * i_VKQ_0 + (nthreads_V == WARP_SIZE ? item_ct1.get_local_id(2) :
+                             2 * i_VKQ_0 + (nthreads_V == WARP_32_SIZE ? item_ct1.get_local_id(2) :
                                                                       item_ct1.get_local_id(2) % nthreads_V) *
                                                V_rows_per_thread);
 #pragma unroll
@@ -408,7 +411,7 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
             for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
                 sycl::float2 tmp[V_rows_per_thread/2];
                 dequantize_V(V + k*nb21, tmp,
-                    2*i_VKQ_0 + (nthreads_V == WARP_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads_V)*V_rows_per_thread);
+                    2*i_VKQ_0 + (nthreads_V == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads_V)*V_rows_per_thread);
 #pragma unroll
                 for (int i_VKQ_1 = 0; i_VKQ_1 < V_rows_per_thread/2; ++i_VKQ_1) {
 #pragma unroll
@@ -487,7 +490,7 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
 
 #ifdef FAST_FP16_AVAILABLE
         sycl::half2 * VKQ_tmp = (sycl::half2 *) KQ + item_ct1.get_local_id(1) * (V_cols_per_iter * D / 2) +
-                                (nthreads_V == WARP_SIZE ? 0 : item_ct1.get_local_id(2) / nthreads_V) * (D / 2);
+                                (nthreads_V == WARP_32_SIZE ? 0 : item_ct1.get_local_id(2) / nthreads_V) * (D / 2);
 
         const sycl::half2 kqmax_scale_h2 = sycl::half2(kqmax_scale, kqmax_scale);
 #pragma unroll
@@ -497,7 +500,7 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
 #pragma unroll
         for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
             const int i_VKQ =
-                i_VKQ_0 + (nthreads_V == WARP_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads_V) *
+                i_VKQ_0 + (nthreads_V == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads_V) *
                               (V_rows_per_thread / 2);
 
             ggml_sycl_memcpy_1<V_rows_per_thread * sizeof(sycl::half)>(VKQ_tmp + i_VKQ,
@@ -505,7 +508,7 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
         }
 #else
         sycl::float2 * VKQ_tmp = (sycl::float2 *) KQ + item_ct1.get_local_id(1)*(V_cols_per_iter*D/2)
-            + (nthreads_V == WARP_SIZE ? 0 : item_ct1.get_local_id(2) / nthreads_V)*(D/2);
+            + (nthreads_V == WARP_32_SIZE ? 0 : item_ct1.get_local_id(2) / nthreads_V)*(D/2);
 
 #pragma unroll
         for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V) {
@@ -514,7 +517,7 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
         }
 #pragma unroll
         for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
-            const int i_VKQ = i_VKQ_0 + (nthreads_V == WARP_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads_V)*(V_rows_per_thread/2);
+            const int i_VKQ = i_VKQ_0 + (nthreads_V == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads_V)*(V_rows_per_thread/2);
 
             ggml_sycl_memcpy_1<V_rows_per_thread/2*sizeof(float)>(VKQ_tmp + i_VKQ,                       &VKQ[j_VKQ][i_VKQ_0/nthreads_V]);
             ggml_sycl_memcpy_1<V_rows_per_thread/2*sizeof(float)>(VKQ_tmp + i_VKQ + V_rows_per_thread/4, &VKQ[j_VKQ][i_VKQ_0/nthreads_V + V_rows_per_thread/4]);
@@ -591,12 +594,13 @@ static void flash_attn_ext_vec(const char * __restrict__ Q,
 #pragma clang diagnostic pop
 #endif // __clang__
 
-template <int D, int cols_per_block, ggml_type type_K, ggml_type type_V, bool use_logit_softcap>
+// template <int D, int cols_per_block, ggml_type type_K, ggml_type type_V, bool use_logit_softcap>
+template <int D, int cols_per_block, int type_K, int type_V, bool use_logit_softcap>
 void ggml_sycl_flash_attn_ext_vec_case_impl(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
     const int cc = ggml_sycl_info().devices[ggml_sycl_get_device()].cc;
 
     const int nthreads = ggml_sycl_fattn_vec_get_nthreads_host(cc);
-    const int nwarps   = nthreads / WARP_SIZE;
+    const int nwarps   = nthreads / WARP_32_SIZE;
     // fattn_kernel_t   fattn_kernel  = flash_attn_ext_vec<D, cols_per_block, type_K, type_V, use_logit_softcap>;
 
     sycl::kernel fattn_kernel = get_sycl_free_ker<flash_attn_ext_vec<
@@ -612,7 +616,8 @@ void ggml_sycl_flash_attn_ext_vec_case_impl(ggml_backend_sycl_context & ctx, ggm
     launch_fattn<D, cols_per_block, 1>(fattn_kernel, ctx, dst, nwarps, nbytes_shared, D, need_f16_K, need_f16_V, false);
 }
 
-template <int D, ggml_type type_K, ggml_type type_V>
+// template <int D, ggml_type type_K, ggml_type type_V>
+template <int D, int type_K, int type_V>
 void ggml_sycl_flash_attn_ext_vec_case(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * KQV = dst;
     const ggml_tensor * Q   = dst->src[0];

@@ -19,6 +19,8 @@
 #include <string>
 
 #include "dpct/helper.hpp"
+#include "ggml.h"
+#include "ggml-impl.h"
 #include "ggml-sycl.h"
 #include "presets.hpp"
 #include "sycl_hw.hpp"
