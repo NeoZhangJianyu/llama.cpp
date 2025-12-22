@@ -148,6 +148,7 @@ static void ggml_sycl_flash_attn_ext_vec(ggml_backend_sycl_context & ctx, ggml_t
     ggml_tensor * V = dst->src[2];
 
 #ifdef GGML_SYCL_FA_ALL_QUANTS
+    printf("zjy ggml_sycl_flash_attn_ext_vec 1\n");
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,  GGML_TYPE_F16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q4_0, GGML_TYPE_F16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q4_1, GGML_TYPE_F16)
@@ -190,6 +191,7 @@ static void ggml_sycl_flash_attn_ext_vec(ggml_backend_sycl_context & ctx, ggml_t
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q5_1, GGML_TYPE_Q8_0)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q8_0, GGML_TYPE_Q8_0)
 #else
+    printf("zjy ggml_sycl_flash_attn_ext_vec 2\n");
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,  GGML_TYPE_F16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q4_0, GGML_TYPE_Q4_0)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q8_0, GGML_TYPE_Q8_0)
@@ -208,7 +210,6 @@ enum best_fattn_kernel {
 };
 
 static best_fattn_kernel ggml_sycl_get_best_fattn_kernel(const int device, const ggml_tensor * dst) {
-    printf("zjy ggml_sycl_get_best_fattn_kernel device=%d\n", device);
 #ifndef FLASH_ATTN_AVAILABLE
     GGML_UNUSED(device); GGML_UNUSED(dst);
     printf("zjy ggml_sycl_get_best_fattn_kernel1 device=%d\n", device);
@@ -228,6 +229,7 @@ static best_fattn_kernel ggml_sycl_get_best_fattn_kernel(const int device, const
     // TODO: temporary until support is extended
     //       https://github.com/ggml-org/llama.cpp/pull/16148#issuecomment-3343525206
     if (K->ne[1] % FATTN_KQ_STRIDE != 0) {
+        printf("zjy ggml_sycl_get_best_fattn_kernel 20\n");
         return BEST_FATTN_KERNEL_NONE;
     }
 
@@ -301,14 +303,16 @@ static best_fattn_kernel ggml_sycl_get_best_fattn_kernel(const int device, const
 
         // Use kernels specialized for small batch sizes if possible:
     if (Q->ne[1] <= 8 && can_use_vector_kernel) {
+        printf("zjy ggml_sycl_get_best_fattn_kernel 12\n");
         return BEST_FATTN_KERNEL_VEC;
     }
 
     // For large batch sizes, use the WMMA kernel if possible:
     if (ggml_sycl_should_use_wmma_fattn(cc)) {
+        printf("zjy ggml_sycl_get_best_fattn_kernel 13\n");
         return BEST_FATTN_KERNEL_WMMA_F16;
     }
-
+    printf("zjy ggml_sycl_get_best_fattn_kernel 14\n");
     // If there is no suitable kernel for tensor cores or small batch sizes, use the generic kernel for large batch sizes:
     return BEST_FATTN_KERNEL_TILE;
 }
@@ -317,17 +321,22 @@ void ggml_sycl_flash_attn_ext(ggml_backend_sycl_context & ctx, ggml_tensor * dst
     ggml_sycl_set_device(ctx.device);
     switch (ggml_sycl_get_best_fattn_kernel(ggml_sycl_get_device(), dst)) {
         case BEST_FATTN_KERNEL_NONE:
+            printf("zjy ggml_sycl_flash_attn_ext 1\n");
             GGML_ABORT("fatal error");
         case BEST_FATTN_KERNEL_TILE:
+        printf("zjy ggml_sycl_flash_attn_ext 2\n");
             ggml_sycl_flash_attn_ext_tile(ctx, dst);
             break;
         case BEST_FATTN_KERNEL_VEC:
+            printf("zjy ggml_sycl_flash_attn_ext 3\n");
             ggml_sycl_flash_attn_ext_vec(ctx, dst);
             break;
         case BEST_FATTN_KERNEL_WMMA_F16:
+            printf("zjy ggml_sycl_flash_attn_ext 4\n");
             ggml_sycl_flash_attn_ext_wmma_f16(ctx, dst);
             break;
         case BEST_FATTN_KERNEL_MMA_F16:
+            printf("zjy ggml_sycl_flash_attn_ext 5\n");
             ggml_sycl_flash_attn_ext_mma_f16(ctx, dst);
             break;
     }

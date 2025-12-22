@@ -15,43 +15,46 @@
 #define HALF_MAX_HALF         __float2half(65504.0f/2) // Use neg. of this instead of -INFINITY to initialize KQ max vals to avoid NaN upon subtraction.
 #define SOFTMAX_FTZ_THRESHOLD -20.0f                   // Softmax exp. of values smaller than this are flushed to zero to avoid NaNs.
 
-typedef void (*fattn_kernel_t)(const char *  Q,
-                               const char *  K,
-                               const char *  V,
-                               const char *  mask,
-                               const char *  sinks,
-                               const int *  KV_max,
-                               float *  dst,
-                               sycl::float2 *  dst_meta,
-                               const float    scale,
-                               const float    max_bias,
-                               const float    m0,
-                               const float    m1,
-                               const uint32_t n_head_log2,
-                               const float    logit_softcap,
-                               const int32_t  ne00,
-                               const int32_t  ne01,
-                               const int32_t  ne02,
-                               const int32_t  ne03,
-                               const int32_t  nb01,
-                               const int32_t  nb02,
-                               const int32_t  nb03,
-                               const int32_t  ne10,
-                               const int32_t  ne11,
-                               const int32_t  ne12,
-                               const int32_t  ne13,
-                               const int32_t  nb11,
-                               const int32_t  nb12,
-                               const int64_t  nb13,
-                               const int32_t  nb21,
-                               const int32_t  nb22,
-                               const int64_t  nb23,
-                               const int32_t  ne31,
-                               const int32_t  ne32,
-                               const int32_t  ne33,
-                               const int32_t  nb31,
-                               const int32_t  nb32,
-                               const int64_t  nb33);
+typedef void (*fattn_kernel_t)(
+    const char* Q,
+    const char* K,
+    const char* V,
+    const char* mask,
+    const char* sinks,
+    const int* KV_max,
+    float* dst,
+    sycl::float2* dst_meta,
+    const float scale,
+    const float max_bias,
+    const float m0,
+    const float m1,
+    const uint32_t n_head_log2,
+    const float logit_softcap,
+    const int32_t ne00,
+    const int32_t ne01,
+    const int32_t ne02,
+    const int32_t ne03,
+    const int32_t nb01,
+    const int32_t nb02,
+    const int32_t nb03,
+    const int32_t ne10,
+    const int32_t ne11,
+    const int32_t ne12,
+    const int32_t ne13,
+    const int32_t nb11,
+    const int32_t nb12,
+    const int64_t nb13,
+    const int32_t nb21,
+    const int32_t nb22,
+    const int64_t nb23,
+    const int32_t ne31,
+    const int32_t ne32,
+    const int32_t ne33,
+    const int32_t nb31,
+    const int32_t nb32,
+    const int64_t nb33,
+    const sycl::nd_item<3> & item_ct1,
+    uint8_t* lsm);
 
 typedef float (*vec_dot_KQ_t)(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds);
@@ -824,12 +827,86 @@ static void flash_attn_combine_results(const float * __restrict__ VKQ_parts,
     dst[tid] = VKQ_numerator / VKQ_denominator;
 }
 
-template <int DV, int ncols1, int ncols2>
+template <fattn_kernel_t fattn_kernel>
+static void lauch_kernel(
+    dpct::dim3 group_range,
+    dpct::dim3 local_range,
+    queue_ptr q,
+    unsigned int local_mem_size,
+    const char* __restrict__ Q,
+    const char* __restrict__ K,
+    const char* __restrict__ V,
+    const char* __restrict__ mask,
+    const char* __restrict__ sinks,
+    const int* __restrict__ KV_max,
+    float* __restrict__ dst,
+    sycl::float2* __restrict__ dst_meta,
+    const float scale,
+    const float max_bias,
+    const float m0,
+    const float m1,
+    const uint32_t n_head_log2,
+    const float logit_softcap,
+    const int32_t ne00,
+    const int32_t ne01,
+    const int32_t ne02,
+    const int32_t ne03,
+    const int32_t nb01,
+    const int32_t nb02,
+    const int32_t nb03,
+    const int32_t ne10,
+    const int32_t ne11,
+    const int32_t ne12,
+    const int32_t ne13,
+    const int32_t nb11,
+    const int32_t nb12,
+    const int64_t nb13,
+    const int32_t nb21,
+    const int32_t nb22,
+    const int64_t nb23,
+    const int32_t ne31,
+    const int32_t ne32,
+    const int32_t ne33,
+    const int32_t nb31,
+    const int32_t nb32,
+    const int64_t nb33) {
+    q->submit([&](sycl::handler &cgh) {
+        uint8_t *lsm = NULL;
+        sycl::local_accessor<uint8_t, 1> scale_local_acc(
+            sycl::range<1>(local_mem_size), cgh);
+        cgh.parallel_for(
+            sycl::nd_range<3>(
+                static_cast<sycl::range<3>>(group_range * local_range),
+                static_cast<sycl::range<3>>(local_range)),
+            [=](sycl::nd_item<3> item_ct1) {
+                fattn_kernel(Q, K, V, mask, sinks, KV_max, dst, dst_meta, scale,
+                             max_bias, m0, m1, n_head_log2, logit_softcap, ne00,
+                             ne01, ne02, ne03, nb01, nb02, nb03, ne10, ne11,
+                             ne12, ne13, nb11, nb12, nb13, nb21, nb22, nb23,
+                             ne31, ne32, ne33, nb31, nb32, nb33,
+                             (const sycl::nd_item<3>)item_ct1,
+                             (uint8_t *)get_pointer(scale_local_acc));
+            });
+    });
+}
+
+template <int DV, int ncols1, int ncols2, fattn_kernel_t fattn_kernel>
 void launch_fattn(
-    sycl::kernel&  fattn_kernel,
     ggml_backend_sycl_context & ctx, ggml_tensor * dst, const int nwarps, const size_t nbytes_shared,
     const int KQ_row_granularity, const bool need_f16_K, const bool need_f16_V, const bool stream_k, const int warp_size = WARP_SIZE
 ) {
+
+    // dpct::queue_ptr  q = ctx.stream();
+    // const dpct::dim3 blocks_num1(1,1, 1);
+    // const dpct::dim3 block_dim1(1, 1, 1);
+
+    // int *A = sycl::malloc_shared<int>(32, *q);
+    // int *B = sycl::malloc_shared<int>(32, *q);
+    // int *C = sycl::malloc_shared<int>(32, *q);
+
+    // lauch_kernel<add_wrap<add>>(blocks_num1, block_dim1, q,
+    //                             (unsigned int)nbytes_shared, A, B, C);
+
     constexpr int ncols = ncols1 * ncols2;
 
     const bool is_mla = DV == 512; // TODO better parameterization
@@ -1062,8 +1139,8 @@ void launch_fattn(
 
     GGML_ASSERT(block_dim.x % warp_size == 0);
 
-    lauch_kernel(
-        blocks_num, block_dim, main_stream, fattn_kernel, (unsigned int) nbytes_shared, (const char *) Q->data, K_data, V_data,
+    lauch_kernel<fattn_kernel>(
+        blocks_num, block_dim, main_stream, (unsigned int) nbytes_shared, (const char *) Q->data, K_data, V_data,
         mask ? ((const char *) mask->data) : nullptr, sinks ? ((const char *) sinks->data) : nullptr, KV_max.ptr,
         !stream_k && parallel_blocks > 1 ? dst_tmp.ptr : (float *) KQV->data, (sycl::float2 *)dst_tmp_meta.ptr, scale, max_bias, m0, m1,
         n_head_log2, logit_softcap, Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3], Q->nb[1], Q->nb[2], Q->nb[3], K->ne[0],

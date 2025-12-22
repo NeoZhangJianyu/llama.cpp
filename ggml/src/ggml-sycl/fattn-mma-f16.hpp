@@ -1367,48 +1367,58 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
 #endif // TURING_MMA_AVAILABLE
 }
 
-template <int DKQ, int DV, int ncols1, int ncols2, int nwarps, int ntiles, bool use_logit_softcap, bool mla>
-SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<3>))
-static void flash_attn_ext_f16(const char * __restrict__ Q,
-                               const char * __restrict__ K,
-                               const char * __restrict__ V,
-                               const char * __restrict__ mask,
-                               const char * __restrict__ sinks,
-                               const int * __restrict__ KV_max,
-                               float * __restrict__ dst,
-                               sycl::float2 * __restrict__ dst_meta,
-                               const float          scale,
-                               const float          max_bias,
-                               const float          m0,
-                               const float          m1,
-                               const uint32_t       n_head_log2,
-                               const float          logit_softcap,
-                               const int32_t        ne00,
-                               const int32_t        ne01,
-                               const int32_t        ne02,
-                               const int32_t        ne03,
-                               const int32_t        nb01,
-                               const int32_t        nb02,
-                               const int32_t        nb03,
-                               const int32_t        ne10,
-                               const int32_t        ne11,
-                               const int32_t        ne12,
-                               const int32_t        ne13,
-                               const int32_t        nb11,
-                               const int32_t        nb12,
-                               const int64_t        nb13,
-                               const int32_t        nb21,
-                               const int32_t        nb22,
-                               const int64_t        nb23,
-                               const int32_t        ne31,
-                               const int32_t        ne32,
-                               const int32_t        ne33,
-                               const int32_t        nb31,
-                               const int32_t        nb32,
-                               const int64_t        nb33) {
-    uint8_t * dpct_local = static_cast<uint8_t *>(syclex::get_work_group_scratch_memory());
-
-    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+template <
+    int DKQ,
+    int DV,
+    int ncols1,
+    int ncols2,
+    int nwarps,
+    int ntiles,
+    bool use_logit_softcap,
+    bool mla>
+// SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<3>))
+static void flash_attn_ext_f16(
+    const char* Q,
+    const char* K,
+    const char* V,
+    const char* mask,
+    const char* sinks,
+    const int* KV_max,
+    float* dst,
+    sycl::float2* dst_meta,
+    const float scale,
+    const float max_bias,
+    const float m0,
+    const float m1,
+    const uint32_t n_head_log2,
+    const float logit_softcap,
+    const int32_t ne00,
+    const int32_t ne01,
+    const int32_t ne02,
+    const int32_t ne03,
+    const int32_t nb01,
+    const int32_t nb02,
+    const int32_t nb03,
+    const int32_t ne10,
+    const int32_t ne11,
+    const int32_t ne12,
+    const int32_t ne13,
+    const int32_t nb11,
+    const int32_t nb12,
+    const int64_t nb13,
+    const int32_t nb21,
+    const int32_t nb22,
+    const int64_t nb23,
+    const int32_t ne31,
+    const int32_t ne32,
+    const int32_t ne33,
+    const int32_t nb31,
+    const int32_t nb32,
+    const int64_t nb33,
+    const sycl::nd_item<3>& item_ct1,
+    uint8_t* lsm) {
+  uint8_t* dpct_local = lsm;
+    //   static_cast<uint8_t*>(syclex::get_work_group_scratch_memory());
 
 #if defined(FLASH_ATTN_AVAILABLE) && defined(TURING_MMA_AVAILABLE)
 
@@ -1603,69 +1613,21 @@ void ggml_sycl_flash_attn_ext_mma_f16_case(ggml_backend_sycl_context & ctx, ggml
     memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
 
     // fattn_kernel_t fattn_kernel;
-    sycl::kernel *fattn_kernel;
-
-    sycl::queue q;
-    constexpr int a = 1;
-    constexpr bool b=true;
-
     if (logit_softcap == 0.0f) {
-      // use_logit_softcap = false;
-      // fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, nwarps,
-      // ntiles, use_logit_softcap, mla>;
-      sycl::kernel fattn_kernel =
-          get_sycl_free_ker<my_ker<DKQ, DV, ncols1, ncols2, nwarps, ntiles, false, mla>>(
-              *ctx.stream());
-      launch_fattn<DV, ncols1, ncols2>(
-          fattn_kernel,
-          ctx,
-          dst,
-          nwarps,
-          nbytes_shared_total,
-          FATTN_KQ_STRIDE,
-          true,
-          true,
+      constexpr bool use_logit_softcap = false;
+      launch_fattn<DV, ncols1, ncols2,
+                   flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, nwarps, ntiles,
+                                      use_logit_softcap, mla>>(
+          ctx, dst, nwarps, nbytes_shared_total, FATTN_KQ_STRIDE, true, true,
           true);
-
     } else {
-      // use_logit_softcap = true;
-      // fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, nwarps,
-      // ntiles, use_logit_softcap, mla>;
-      sycl::kernel fattn_kernel =
-          get_sycl_free_ker<my_ker<DKQ, DV, ncols1, ncols2, nwarps, ntiles, true, mla>>(
-              *ctx.stream());
-      launch_fattn<DV, ncols1, ncols2>(
-          fattn_kernel,
-          ctx,
-          dst,
-          nwarps,
-          nbytes_shared_total,
-          FATTN_KQ_STRIDE,
-          true,
-          true,
+      constexpr bool use_logit_softcap = true;
+      launch_fattn<DV, ncols1, ncols2,
+                   flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, nwarps, ntiles,
+                                      use_logit_softcap, mla>>(
+          ctx, dst, nwarps, nbytes_shared_total, FATTN_KQ_STRIDE, true, true,
           true);
     }
-
-    // sycl::kernel fattn_kernel = get_sycl_free_ker<my_ker<
-    //     a,
-    //     a,
-    //     a,
-    //     a,
-    //     nwarps,
-    //     ntiles,
-    //     use_logit_softcap,
-    //     mla>>(*ctx.stream());
-    // sycl::kernel fattn_kernel = get_sycl_free_ker<flash_attn_ext_f16<
-    //     (int)DKQ,
-    //     (int)DV,
-    //     (int)ncols1,
-    //     (int)ncols2,
-    //     (int)nwarps,
-    //     (int)ntiles,
-    //     (bool)use_logit_softcap,
-    //     (bool)mla>>(*ctx.stream());
-
-
 }
 
 

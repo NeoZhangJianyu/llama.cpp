@@ -488,7 +488,12 @@ static void dequantize_block_nc(const void * __restrict__ vx, dst_t * __restrict
     const int64_t y_offset = qr == 1 ? 1 : qk/2;
 
     // dequantize
-    sycl::float2 v;
+    #ifdef GGML_SYCL_F16
+        sycl::half2 v;
+    #else
+        sycl::float2 v;
+    #endif
+
     dequantize_kernel(vx, ib, iqs, v);
 
     const int64_t iy0 = ((i03*ne02 + i02)*ne01 + i01)*ne00 + iybs + iqs;

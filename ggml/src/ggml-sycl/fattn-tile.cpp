@@ -106,46 +106,46 @@ static constexpr int fattn_tile_get_occupancy_device(int ncols) {
 }
 
 template <int D, int ncols, bool use_logit_softcap>  // D == head size
-SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<3>))
-void flash_attn_tile(const char *  Q,
-                            const char *  K,
-                            const char *  V,
-                            const char *  mask,
-                            const char *  sinks,
-                            const int *  KV_max,
-                            float *  dst,
-                            sycl::float2 *  dst_meta,
-                            const float          scale,
-                            const float          max_bias,
-                            const float          m0,
-                            const float          m1,
-                            const uint32_t       n_head_log2,
-                            const float          logit_softcap,
-                            const int32_t        ne00,
-                            const int32_t        ne01,
-                            const int32_t        ne02,
-                            const int32_t        ne03,
-                            const int32_t        nb01,
-                            const int32_t        nb02,
-                            const int32_t        nb03,
-                            const int32_t        ne10,
-                            const int32_t        ne11,
-                            const int32_t        ne12,
-                            const int32_t        ne13,
-                            const int32_t        nb11,
-                            const int32_t        nb12,
-                            const int64_t        nb13,
-                            const int32_t        nb21,
-                            const int32_t        nb22,
-                            const int64_t        nb23,
-                            const int32_t        ne31,
-                            const int32_t        ne32,
-                            const int32_t        ne33,
-                            const int32_t        nb31,
-                            const int32_t        nb32,
-                            const int64_t        nb33) {
-    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
-
+// SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<3>))
+void flash_attn_tile(const char* Q,
+                     const char* K,
+                     const char* V,
+                     const char* mask,
+                     const char* sinks,
+                     const int* KV_max,
+                     float* dst,
+                     sycl::float2* dst_meta,
+                     const float scale,
+                     const float max_bias,
+                     const float m0,
+                     const float m1,
+                     const uint32_t n_head_log2,
+                     const float logit_softcap,
+                     const int32_t ne00,
+                     const int32_t ne01,
+                     const int32_t ne02,
+                     const int32_t ne03,
+                     const int32_t nb01,
+                     const int32_t nb02,
+                     const int32_t nb03,
+                     const int32_t ne10,
+                     const int32_t ne11,
+                     const int32_t ne12,
+                     const int32_t ne13,
+                     const int32_t nb11,
+                     const int32_t nb12,
+                     const int64_t nb13,
+                     const int32_t nb21,
+                     const int32_t nb22,
+                     const int64_t nb23,
+                     const int32_t ne31,
+                     const int32_t ne32,
+                     const int32_t ne33,
+                     const int32_t nb31,
+                     const int32_t nb32,
+                     const int64_t nb33,
+                     const sycl::nd_item<3>& item_ct1,
+                     uint8_t* unused_lsm) {
 #ifdef FLASH_ATTN_AVAILABLE
 
     // Skip unused kernel variants for faster compilation:
@@ -219,8 +219,8 @@ void flash_attn_tile(const char *  Q,
     constexpr size_t local_share_mem_size = lsm_size1 + lsm_size2 + lsm_size3;
     syclex::work_group_static<char[local_share_mem_size]> lsm;
     half (*KQ)[KQ_d1][KQ_d2][KQ_d3] = (half (*)[KQ_d1][KQ_d2][KQ_d3])&lsm;
-    sycl::half2 (*Q_tmp)[Q_tmp_d1][Q_tmp_d2] = (sycl::half2 (*)[Q_tmp_d1][Q_tmp_d2]) (&lsm+lsm_size1);
-    sycl::half2 (*KV_tmp)[KV_tmp_d1] = (sycl::half2 (*)[KV_tmp_d1]) (&lsm+lsm_size1+lsm_size2);
+    sycl::half2 (*Q_tmp)[Q_tmp_d1][Q_tmp_d2] = (sycl::half2 (*)[Q_tmp_d1][Q_tmp_d2]) ((char*)&lsm+lsm_size1);
+    sycl::half2 (*KV_tmp)[KV_tmp_d1] = (sycl::half2 (*)[KV_tmp_d1]) ((char*)&lsm+lsm_size1+lsm_size2);
 
     sycl::half2 VKQ[cpw][D / (2 * warp_size)] = { { { 0.0f, 0.0f } } };
 #else
@@ -245,8 +245,8 @@ void flash_attn_tile(const char *  Q,
     // __shared__ float KV_tmp[kq_stride * (kq_nbatch + cpy_ne)]; // Padded to avoid memory bank conflicts.
 
     float (*KQ)[KQ_d1][KQ_d2][KQ_d3] = (float (*)[KQ_d1][KQ_d2][KQ_d3])&lsm;
-    float (*Q_tmp)[Q_tmp_d1][Q_tmp_d2] = (float (*)[Q_tmp_d1][Q_tmp_d2]) (&lsm+lsm_size1);
-    float (*KV_tmp)[KV_tmp_d1] = (float (*)[KV_tmp_d1]) (&lsm+lsm_size1+lsm_size2);
+    float (*Q_tmp)[Q_tmp_d1][Q_tmp_d2] = (float (*)[Q_tmp_d1][Q_tmp_d2]) ((char*)&lsm+lsm_size1);
+    float (*KV_tmp)[KV_tmp_d1] = (float (*)[KV_tmp_d1]) ((char*)&lsm+lsm_size1+lsm_size2);
 
     sycl::float2 VKQ[cpw][D/(2*warp_size)] = {{{0.0f, 0.0f}}};
 #endif // FAST_FP16_AVAILABLE
@@ -710,35 +710,22 @@ static void launch_fattn_tile_switch_ncols(ggml_backend_sycl_context & ctx, ggml
     if (Q->ne[1] > 16) {
         constexpr int cols_per_block = 32;
         const int nwarps = fattn_tile_get_nthreads_host(cc, cols_per_block) / warp_size;
-        // fattn_kernel_t fattn_kernel   = flash_attn_tile<D, cols_per_block, use_logit_softcap>;
-        sycl::kernel fattn_kernel = get_sycl_free_ker<
-            flash_attn_tile<D, cols_per_block, use_logit_softcap>>(
-            *ctx.stream());
         const int kq_stride = fattn_tile_get_kq_stride_host(D, cols_per_block, cc, warp_size);
-        launch_fattn<D, cols_per_block, 1>(
-            fattn_kernel,
-            ctx,
-            dst,
-            nwarps,
-            nbytes_shared,
-            kq_stride,
-            true,
-            true,
-            false,
+        launch_fattn<D, cols_per_block, 1,
+                     flash_attn_tile<D, cols_per_block, use_logit_softcap>>(
+            ctx, dst, nwarps, nbytes_shared, kq_stride, true, true, false,
             warp_size);
         return;
     }
 
     constexpr int cols_per_block = 16;
     const int nwarps = fattn_tile_get_nthreads_host(cc, cols_per_block) / warp_size;
-    // fattn_kernel_t fattn_kernel   = flash_attn_tile<D, cols_per_block, use_logit_softcap>;
-    sycl::kernel fattn_kernel = get_sycl_free_ker<
-            flash_attn_tile<D, cols_per_block, use_logit_softcap>>(
-            *ctx.stream());
 
     const int kq_stride = fattn_tile_get_kq_stride_host(D, cols_per_block, cc, warp_size);
-    launch_fattn<D, cols_per_block, 1>
-        (fattn_kernel, ctx, dst, nwarps, nbytes_shared, kq_stride, true, true, false, warp_size);
+    launch_fattn<D, cols_per_block, 1,
+                 flash_attn_tile<D, cols_per_block, use_logit_softcap>>(
+        ctx, dst, nwarps, nbytes_shared, kq_stride, true, true, false,
+        warp_size);
 }
 
 template <bool use_logit_softcap>

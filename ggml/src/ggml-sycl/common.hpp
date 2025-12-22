@@ -828,22 +828,4 @@ sycl::kernel get_sycl_free_ker(sycl::queue& q) {
   return ker;
 }
 
-template <typename... ArgsT>
-static void lauch_kernel(
-    dpct::dim3 group_range,
-    dpct::dim3 local_range,
-    queue_ptr q,
-    sycl::kernel& ker,
-    unsigned int local_mem_size,
-    ArgsT... args) {
-  syclexp::launch_config cfg{
-      sycl::nd_range<3>(
-          static_cast<sycl::range<3>>(group_range * local_range),
-          static_cast<sycl::range<3>>(local_range)),
-      syclexp::properties{
-          syclexp::work_group_scratch_size{local_mem_size * sizeof(char)}}};
-
-  syclexp::nd_launch(*q, cfg, ker, args...);
-}
-
 #endif // GGML_SYCL_COMMON_HPP

@@ -7,8 +7,6 @@
 #include <cmath>
 #include <float.h>
 
-ggml_type type_K;
-
 namespace syclex = sycl::ext::oneapi::experimental;
 
 static int ggml_sycl_fattn_vec_get_nthreads_host(const int cc) {
@@ -26,49 +24,56 @@ static constexpr int ggml_sycl_fattn_vec_get_nthreads_device() {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wpass-failed"
 #endif // __clang__
-template <int D, int ncols, int type_K, int type_V, bool use_logit_softcap>  // D == head size
-SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<3>))
-void flash_attn_ext_vec(const char * __restrict__ Q,
-                               const char * __restrict__ K,
-                               const char * __restrict__ V,
-                               const char * __restrict__ mask,
-                               const char * __restrict__ sinks,
-                               const int * __restrict__ KV_max,
-                               float * __restrict__ dst,
-                               sycl::float2 * __restrict__ dst_meta,
-                               const float          scale,
-                               const float          max_bias,
-                               const float          m0,
-                               const float          m1,
-                               const uint32_t       n_head_log2,
-                               const float          logit_softcap,
-                               const int32_t        ne00,
-                               const int32_t        ne01,
-                               const int32_t        ne02,
-                               const int32_t        ne03,
-                               const int32_t        nb01,
-                               const int32_t        nb02,
-                               const int32_t        nb03,
-                               const int32_t        ne10,
-                               const int32_t        ne11,
-                               const int32_t        ne12,
-                               const int32_t        ne13,
-                               const int32_t        nb11,
-                               const int32_t        nb12,
-                               const int64_t        nb13,
-                               const int32_t        nb21,
-                               const int32_t        nb22,
-                               const int64_t        nb23,
-                               const int32_t        ne31,
-                               const int32_t        ne32,
-                               const int32_t        ne33,
-                               const int32_t        nb31,
-                               const int32_t        nb32,
-                               const int64_t        nb33) {
+
+template <int D,
+          int ncols,
+          int type_K,
+          int type_V,
+          bool use_logit_softcap>  // D == head size
+static void flash_attn_ext_vec(const char* __restrict__ Q,
+                        const char* __restrict__ K,
+                        const char* __restrict__ V,
+                        const char* __restrict__ mask,
+                        const char* __restrict__ sinks,
+                        const int* __restrict__ KV_max,
+                        float* __restrict__ dst,
+                        sycl::float2* __restrict__ dst_meta,
+                        const float scale,
+                        const float max_bias,
+                        const float m0,
+                        const float m1,
+                        const uint32_t n_head_log2,
+                        const float logit_softcap,
+                        const int32_t ne00,
+                        const int32_t ne01,
+                        const int32_t ne02,
+                        const int32_t ne03,
+                        const int32_t nb01,
+                        const int32_t nb02,
+                        const int32_t nb03,
+                        const int32_t ne10,
+                        const int32_t ne11,
+                        const int32_t ne12,
+                        const int32_t ne13,
+                        const int32_t nb11,
+                        const int32_t nb12,
+                        const int64_t nb13,
+                        const int32_t nb21,
+                        const int32_t nb22,
+                        const int64_t nb23,
+                        const int32_t ne31,
+                        const int32_t ne32,
+                        const int32_t ne33,
+                        const int32_t nb31,
+                        const int32_t nb32,
+                        const int64_t nb33,
+                        const sycl::nd_item<3>& item_ct1,
+                        uint8_t* unused_lsm) {
+// sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec\n");
 #ifdef FLASH_ATTN_AVAILABLE
 
     // Skip unused kernel variants for faster compilation:
-    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    // auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     if (use_logit_softcap && !(D == 128 || D == 256)) {
         GGML_UNUSED_VARS(Q, K, V, mask, sinks, KV_max, dst, dst_meta, scale,
             max_bias, m0, m1, n_head_log2, logit_softcap,
@@ -79,6 +84,7 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
                   nb21, nb22, nb23,
                   ne31, ne32, ne33,
                   nb31, nb32, nb33);
+        sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 1\n");
         return;
     }
 
@@ -87,17 +93,8 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
     constexpr int cpy_nb = ggml_sycl_get_max_cpy_bytes();
     constexpr int cpy_ne = cpy_nb / 4;
 
-#ifdef GGML_USE_HIP
-#ifdef RDNA
-    constexpr int nthreads_KQ_q = 2;
-#else
-    constexpr int nthreads_KQ_q = 4;
-#endif // RDNA
-    constexpr int nthreads_V_q  = (D/4 < 32 ? D/4 : 32);
-#else
     constexpr int nthreads_KQ_q = (D/4 < 32 ? D/4 : 32);
     constexpr int nthreads_V_q  = (D/4 < 32 ? D/4 : 32);
-#endif // GGML_USE_HIP
 
     constexpr int nthreads    = ggml_sycl_fattn_vec_get_nthreads_device();
     constexpr int nthreads_KQ = type_K == GGML_TYPE_F16 ? 128 / cpy_nb : nthreads_KQ_q;
@@ -150,31 +147,40 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
     constexpr size_t local_share_mem_size = lsm_size1 + lsm_size2 + lsm_size3;
 
     syclex::work_group_static<char[local_share_mem_size]> lsm;
-
     // char *lsm = static_cast<char *>(syclex::get_work_group_scratch_memory());
-
+    // sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 16 lsm=%p\n", &lsm);
 
     float (*KQ_max_shared)[WARP_32_SIZE] = (float (*)[WARP_32_SIZE])&lsm;
-    float (*KQ_sum_shared)[WARP_32_SIZE] = (float (*)[WARP_32_SIZE])(&lsm+lsm_size1);
-    sycl::half* KQ = (sycl::half*)(&lsm + lsm_size1 + lsm_size2);
+    float (*KQ_sum_shared)[WARP_32_SIZE] = (float (*)[WARP_32_SIZE])((char*)&lsm+lsm_size1);
+    sycl::half* KQ = (sycl::half*)((char*)&lsm + lsm_size1 + lsm_size2);
 
 #else
     sycl::float2 VKQ[ncols][(D/2)/nthreads_V] = {{{0.0f, 0.0f}}};
+    //   if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec x=%f y=%f x=%f y=%f\n",
+    //    VKQ[0][0].x(), VKQ[0][0].y(),VKQ[0][1].x(), VKQ[0][1].y());
+
     // __shared__ float  KQ[ne_KQ > ne_combine ? ne_KQ : ne_combine];
     constexpr size_t lsm_size3 = (ne_KQ > ne_combine ? ne_KQ : ne_combine)*sizeof(float);
     constexpr size_t local_share_mem_size = lsm_size1 + lsm_size2 + lsm_size3;
-
     syclex::work_group_static<char[local_share_mem_size]> lsm;
     // char *lsm = static_cast<char *>(syclex::get_work_group_scratch_memory());
 
     float (*KQ_max_shared)[WARP_32_SIZE] = (float (*)[WARP_32_SIZE])&lsm;
-    float (*KQ_sum_shared)[WARP_32_SIZE] = (float (*)[WARP_32_SIZE])(&lsm+lsm_size1);
-    float* KQ = (float*)(&lsm + lsm_size1 + lsm_size2);
+    float (*KQ_sum_shared)[WARP_32_SIZE] = (float (*)[WARP_32_SIZE])((char*)&lsm+lsm_size1);
+    float* KQ = (float*)((char*)&lsm + lsm_size1 + lsm_size2);
+
+    // if (item_ct1.get_global_id(2) == 0)
+    //     sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 32 lsm=%p KQ_max_shared=%p KQ_sum_shared=%p KQ=%p lsm_size1=%d, lsm_size2=%d, lsm_size3=%d local_share_mem_size=%d\n",
+    //         &lsm, KQ_max_shared, KQ_sum_shared, KQ, lsm_size1, lsm_size2, lsm_size3, local_share_mem_size);
+
 
 #endif // FAST_FP16_AVAILABLE
 
     float KQ_max[ncols];
     float KQ_sum[ncols];
+    // if (item_ct1.get_global_id(2) == 0)
+    //    sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec ncols=%d (D/2)/nthreads_V=%d\n",
+    //    ncols, (D/2)/nthreads_V);
 #pragma unroll
     for (int j = 0; j < ncols; ++j) {
         KQ_max[j] = -FLT_MAX/2.0f;
@@ -187,6 +193,9 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
 #else
     sycl::float2 Q_reg[ncols][(D/2)/nthreads_KQ] = {{{0.0f, 0.0f}}}; // May be only partially initialized.
 #endif // FAST_FP16_AVAILABLE
+
+// if (item_ct1.get_global_id(2) == 0) sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 3\n");
+
     int    Q_i32[ncols][1 > D/(sizeof(int)*nthreads_KQ) ? 1 : D/(sizeof(int)*nthreads_KQ)];
     sycl::float2 Q_ds[ncols][1 > D / (sizeof(int) * nthreads_KQ) ? 1 : D / (sizeof(int) * nthreads_KQ)];
     if constexpr (Q_q8_1) {
@@ -202,6 +211,9 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
             int    * tmp_q_i32 = (int    *) &KQ[j*D];
             sycl::float2 * tmp_q_ds  = (sycl::float2 *) (tmp_q_i32 + D / sizeof(int));
 
+            // sycl::ext::oneapi::experimental::printf("zjy tmp_q_i32=%p tmp_q_ds=%p D / sizeof(int)=%d\n",
+            // tmp_q_i32, tmp_q_ds, D / sizeof(int));
+
             // Set memory to zero if out of bounds:
             if (ncols > 1 && ic0 + j >= ne01) {
 #pragma unroll
@@ -213,6 +225,7 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
                     }
                 }
                 if (item_ct1.get_local_id(2) < D/QK8_1) {
+                    // zjy
                     tmp_q_ds[item_ct1.get_local_id(2)] = sycl::float2(0.0f, 0.0f);
                 }
             } else {
@@ -220,6 +233,7 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
                 constexpr int nthreads_quantize = D/sizeof(int) < WARP_32_SIZE ? D/sizeof(int) : WARP_32_SIZE;
 #pragma unroll
                 for (int i0 = 0; i0 < int(D/sizeof(int)); i0 += nthreads_quantize) {
+                    // zjy
                     quantize_q8_1_to_shared<sycl::float2, nthreads_quantize>
                         (Q_f + i0*sizeof(int), scale, tmp_q_i32 + i0, tmp_q_ds + i0/QI8_1);
                 }
@@ -228,6 +242,7 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
 
         item_ct1.barrier(sycl::access::fence_space::local_space);
 
+        // if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 4\n");
 #pragma unroll
         for (int j = 0; j < ncols; ++j) {
             int    * tmp_q_i32 = (int    *) &KQ[j*D];
@@ -244,6 +259,7 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
         }
 
         item_ct1.barrier(sycl::access::fence_space::local_space);
+        // if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 5\n");
     } else {
 #ifdef FAST_FP16_AVAILABLE
         const sycl::half2 scale_h2 = sycl::half2(scale, scale);
@@ -294,6 +310,8 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
 #endif // FAST_FP16_AVAILABLE
     }
 
+// if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 6\n");
+
     const int k_VKQ_max = KV_max ? KV_max[sequence * item_ct1.get_group_range(2) + item_ct1.get_group(2)] : ne11;
     K += item_ct1.get_group(1) * nthreads * nb11;
     V += item_ct1.get_group(1) * nthreads * nb21;
@@ -339,7 +357,7 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
                 }
             }
         }
-
+        // if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 7\n");
 #pragma unroll
         for (int j = 0; j < ncols; ++j) {
 #pragma unroll
@@ -374,7 +392,7 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
 #ifndef GGML_USE_HIP
         sycl::group_barrier(sycl::ext::oneapi::this_work_item::get_sub_group());
 #endif // GGML_USE_HIP
-
+// if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 8\n");
 #pragma unroll
         for (int k0 = 0; k0 < WARP_32_SIZE; k0 += V_cols_per_iter) {
             const int k = item_ct1.get_local_id(1) * WARP_32_SIZE + k0 +
@@ -418,12 +436,19 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
                     for (int j = 0; j < ncols; ++j) {
                         VKQ[j][i_VKQ_0/nthreads_V + i_VKQ_1].x() += tmp[i_VKQ_1].x()*KQ_k[j];
                         VKQ[j][i_VKQ_0/nthreads_V + i_VKQ_1].y() += tmp[i_VKQ_1].y()*KQ_k[j];
+                        // if (item_ct1.get_global_id(2) == 0){
+                        //   sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 8 j=%d i_VKQ_0/nthreads_V + i_VKQ_1=%d x=%f\n",
+                        //     j, i_VKQ_0/nthreads_V + i_VKQ_1, VKQ[j][i_VKQ_0/nthreads_V + i_VKQ_1].x());
+                        //   }
                     }
                 }
             }
 #endif // FAST_FP16_AVAILABLE
         }
     }
+
+
+// if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 9\n");
 
     if (sinks && item_ct1.get_group(1) == 0) {
         const float sink = ((const float *) sinks)[head];
@@ -435,6 +460,7 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
             if (j0 + nwarps > ncols && j >= ncols) {
                 break;
             }
+            //if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec j=%d\n",j);
 
             const float kqmax_new_j  = sycl::fmax(sink, (float) KQ_max[j]);
             const float KQ_max_scale = sycl::native::exp((float) (KQ_max[j] - kqmax_new_j));
@@ -450,14 +476,39 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
                 VKQ[j][i_VKQ_0/nthreads_V] *= KQ_max_scale_h2;
             }
 #else
+// if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec fp32\n");
 #pragma unroll
             for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V) {
-                VKQ[j][i_VKQ_0/nthreads_V].x() *= KQ_max_scale;
-                VKQ[j][i_VKQ_0/nthreads_V].y() *= KQ_max_scale;
+                const int vv = int(i_VKQ_0/nthreads_V);
+                // if (item_ct1.get_global_id(2) == 0)
+                {
+                // sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec j=%d i_VKQ_0/nthreads_V=%d vv=%d\n",j,
+                // i_VKQ_0/nthreads_V, vv);
+                // sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec j=%d i_VKQ_0/nthreads_V=%d x=%f y=%f\n",j,
+                // i_VKQ_0/nthreads_V, VKQ[0][1].x(), VKQ[0][1].y());
+                }
+                // VKQ[j][i_VKQ_0/nthreads_V].x() *= KQ_max_scale;
+                // VKQ[j][i_VKQ_0/nthreads_V].y() *= KQ_max_scale;
+                // float x = VKQ[j][vv].x()* KQ_max_scale;
+                // VKQ[j][i_VKQ_0/nthreads_V].x() *= KQ_max_scale;
+                // VKQ[j][i_VKQ_0/nthreads_V].y() *= KQ_max_scale;
+                // if ((vv==0 || vv==1) && j==0)
+                {
+                    // sycl::ext::oneapi::experimental::printf("zjy ok vv=%d j=%d\n", vv, j);
+                    VKQ[j][vv].x() *= KQ_max_scale;
+                    VKQ[j][vv].y() *= KQ_max_scale;
+                }
+                // else {
+                //     sycl::ext::oneapi::experimental::printf("zjy error vv=%d j=%d\n", vv, j);
+                // }
+                // VKQ[j][vv].x() *= KQ_max_scale;
+                // VKQ[j][vv].y() *= KQ_max_scale;;
             }
 #endif // FAST_FP16_AVAILABLE
         }
     }
+
+// if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 10\n");
 
 #pragma unroll
     for (int j = 0; j < ncols; ++j) {
@@ -468,6 +519,8 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
     }
 
     item_ct1.barrier(sycl::access::fence_space::local_space);
+// if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 11\n");
+
 
 #pragma unroll
     for (int j = 0; j < ncols; ++j) {
@@ -475,6 +528,10 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
             KQ_max_shared[j][item_ct1.get_local_id(1)] = KQ_max[j];
         }
     }
+
+
+// if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 111\n");
+
     item_ct1.barrier(sycl::access::fence_space::local_space);
 
 #pragma unroll
@@ -507,6 +564,7 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
                                                                        &VKQ[j_VKQ][i_VKQ_0 / nthreads_V]);
         }
 #else
+
         sycl::float2 * VKQ_tmp = (sycl::float2 *) KQ + item_ct1.get_local_id(1)*(V_cols_per_iter*D/2)
             + (nthreads_V == WARP_32_SIZE ? 0 : item_ct1.get_local_id(2) / nthreads_V)*(D/2);
 
@@ -537,6 +595,7 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
         DPCT1065:68: Consider replacing sycl::nd_item::barrier() with sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better performance if there is no access to global memory.
         */
         item_ct1.barrier();
+// if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 12\n");
 
         if (nthreads <= D || tid < D) {
             KQ_sum[j_VKQ] = KQ_sum_shared[j_VKQ][item_ct1.get_local_id(2)];
@@ -578,6 +637,8 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
         dst_meta[((sequence * ne01 + ic0 + tid) * ne02 + head) * item_ct1.get_group_range(1) + item_ct1.get_group(1)] =
             make_float2(KQ_max[tid], KQ_sum[tid]);
     }
+    // sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 2\n");
+
 #else
     GGML_UNUSED_VARS(Q, K, V, mask, sinks, KV_max, dst, dst_meta, scale,
         max_bias, m0, m1, n_head_log2, logit_softcap,
@@ -588,6 +649,7 @@ void flash_attn_ext_vec(const char * __restrict__ Q,
               nb21, nb22, nb23,
               ne31, ne32, ne33,
               nb31, nb32, nb33);
+    sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 3\n");
 #endif // FLASH_ATTN_AVAILABLE
 }
 #ifdef __clang__
@@ -601,19 +663,20 @@ void ggml_sycl_flash_attn_ext_vec_case_impl(ggml_backend_sycl_context & ctx, ggm
 
     const int nthreads = ggml_sycl_fattn_vec_get_nthreads_host(cc);
     const int nwarps   = nthreads / WARP_32_SIZE;
-    // fattn_kernel_t   fattn_kernel  = flash_attn_ext_vec<D, cols_per_block, type_K, type_V, use_logit_softcap>;
-
-    sycl::kernel fattn_kernel = get_sycl_free_ker<flash_attn_ext_vec<
-        D,
-        cols_per_block,
-        type_K,
-        type_V,
-        use_logit_softcap>>(*ctx.stream());
 
     constexpr bool need_f16_K = false;
     constexpr bool need_f16_V = false;
     constexpr size_t nbytes_shared = 0;
-    launch_fattn<D, cols_per_block, 1>(fattn_kernel, ctx, dst, nwarps, nbytes_shared, D, need_f16_K, need_f16_V, false);
+    printf("zjy ggml_sycl_flash_attn_ext_vec_case_impl cc=%d, nthreads=%d nwarps=%d\n", cc, nthreads, nwarps);
+    #ifdef FAST_FP16_AVAILABLE
+      printf("zjy fp16\n");
+    #else
+      printf("zjy fp32\n");
+    #endif
+    launch_fattn<D, cols_per_block, 1,
+                 flash_attn_ext_vec<D, cols_per_block, type_K, type_V,
+                                    use_logit_softcap>>(
+        ctx, dst, nwarps, nbytes_shared, D, need_f16_K, need_f16_V, false);
 }
 
 // template <int D, ggml_type type_K, ggml_type type_V>
@@ -639,7 +702,7 @@ void ggml_sycl_flash_attn_ext_vec_case(ggml_backend_sycl_context & ctx, ggml_ten
             constexpr bool use_logit_softcap = true;
             ggml_sycl_flash_attn_ext_vec_case_impl<D, cols_per_block, type_K, type_V, use_logit_softcap>(ctx, dst);
         }
-        return;
+
     }
 
     constexpr int cols_per_block = 2;

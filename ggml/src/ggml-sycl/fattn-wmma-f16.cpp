@@ -24,46 +24,53 @@ namespace wmma = rocwmma;
 #endif // GGML_USE_WMMA_FATTN
 
 // D == head size, VKQ_stride == num VKQ rows calculated in parallel:
-template <int D, int ncols, int nwarps, int VKQ_stride, typename KQ_acc_t, bool use_logit_softcap>
-SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<3>))
-static void flash_attn_ext_f16(const char *  Q,
-                               const char *  K,
-                               const char *  V,
-                               const char *  mask,
-                               const char *  sinks,
-                               const int *  KV_max,
-                               float *  dst,
-                               sycl::float2 *  dst_meta,
-                               const float          scale,
-                               const float          max_bias,
-                               const float          m0,
-                               const float          m1,
-                               const uint32_t       n_head_log2,
-                               const float          logit_softcap,
-                               const int32_t        ne00,
-                               const int32_t        ne01,
-                               const int32_t        ne02,
-                               const int32_t        ne03,
-                               const int32_t        nb01,
-                               const int32_t        nb02,
-                               const int32_t        nb03,
-                               const int32_t        ne10,
-                               const int32_t        ne11,
-                               const int32_t        ne12,
-                               const int32_t        ne13,
-                               const int32_t        nb11,
-                               const int32_t        nb12,
-                               const int64_t        nb13,
-                               const int32_t        nb21,
-                               const int32_t        nb22,
-                               const int64_t        nb23,
-                               const int32_t        ne31,
-                               const int32_t        ne32,
-                               const int32_t        ne33,
-                               const int32_t        nb31,
-                               const int32_t        nb32,
-                               const int64_t        nb33) {
-    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+template <int D,
+          int ncols,
+          int nwarps,
+          int VKQ_stride,
+          typename KQ_acc_t,
+          bool use_logit_softcap>
+// SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<3>))
+static void flash_attn_ext_f16(const char* Q,
+                               const char* K,
+                               const char* V,
+                               const char* mask,
+                               const char* sinks,
+                               const int* KV_max,
+                               float* dst,
+                               sycl::float2* dst_meta,
+                               const float scale,
+                               const float max_bias,
+                               const float m0,
+                               const float m1,
+                               const uint32_t n_head_log2,
+                               const float logit_softcap,
+                               const int32_t ne00,
+                               const int32_t ne01,
+                               const int32_t ne02,
+                               const int32_t ne03,
+                               const int32_t nb01,
+                               const int32_t nb02,
+                               const int32_t nb03,
+                               const int32_t ne10,
+                               const int32_t ne11,
+                               const int32_t ne12,
+                               const int32_t ne13,
+                               const int32_t nb11,
+                               const int32_t nb12,
+                               const int64_t nb13,
+                               const int32_t nb21,
+                               const int32_t nb22,
+                               const int64_t nb23,
+                               const int32_t ne31,
+                               const int32_t ne32,
+                               const int32_t ne33,
+                               const int32_t nb31,
+                               const int32_t nb32,
+                               const int64_t nb33,
+                               const sycl::nd_item<3>& item_ct1,
+                               uint8_t* unused_lsm) {
+  // auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
 
 #if defined(FLASH_ATTN_AVAILABLE) && (DPCT_COMPATIBILITY_TEMP == GGML_SYCL_CC_VOLTA || \
                                       (defined(GGML_HIP_ROCWMMA_FATTN) && defined(GGML_USE_WMMA_FATTN)))
@@ -128,8 +135,8 @@ static void flash_attn_ext_f16(const char *  Q,
     size_t lsm_size2 = ncols*D_padded*sizeof(half);
     size_t local_share_mem_size = lsm_size1+lsm_size2;
     syclex::work_group_static<char[local_share_mem_size]> lsm;
-    half *KQ = (half*) lsm;
-    half *VKQ = (half*) (lsm + lsm_size1);
+    half *KQ = (half*) &lsm;
+    half *VKQ = (half*) ((char*)&lsm + lsm_size1);
 
     float * KQ_f = (float *) KQ;
     half2 * KQ2 = (half2 *) KQ;
@@ -558,51 +565,20 @@ void ggml_sycl_flash_attn_ext_wmma_f16_case(ggml_backend_sycl_context & ctx, ggm
     // fattn_kernel_t fattn_kernel;
     if (logit_softcap == 0.0f) {
       constexpr bool use_logit_softcap = false;
-      // fattn_kernel = flash_attn_ext_f16<D, cols_per_block, nwarps,
-      // get_VKQ_stride(D, nwarps, frag_m),
-      //                                           KQ_acc_t, false>;
-      sycl::kernel fattn_kernel = get_sycl_free_ker<flash_attn_ext_f16<
-          D,
-          cols_per_block,
-          nwarps,
-          get_VKQ_stride(D, nwarps, frag_m),
-          KQ_acc_t,
-          false>>(*ctx.stream());
-      launch_fattn<D, cols_per_block, 1>(
-          fattn_kernel,
-          ctx,
-          dst,
-          nwarps,
-          0,
-          FATTN_KQ_STRIDE,
-          true,
-          true,
-          false,
-          warp_size);
+      launch_fattn<D, cols_per_block, 1,
+                   flash_attn_ext_f16<D, cols_per_block, nwarps,
+                                      get_VKQ_stride(D, nwarps, frag_m),
+                                      KQ_acc_t, false>>(
+          ctx, dst, nwarps, 0, FATTN_KQ_STRIDE, true, true, false, warp_size);
 
     } else {
       constexpr bool use_logit_softcap = true;
-      // fattn_kernel = flash_attn_ext_f16<D, cols_per_block, nwarps,
-      // get_VKQ_stride(D, nwarps, frag_m),
-      //                                           KQ_acc_t, use_logit_softcap>;
-      sycl::kernel fattn_kernel = get_sycl_free_ker<flash_attn_ext_f16<
-          D,
-          cols_per_block,
-          nwarps,
-          get_VKQ_stride(D, nwarps, frag_m),
-          KQ_acc_t,
-          true>>(*ctx.stream());
-      launch_fattn<D, cols_per_block, 1>(
-          fattn_kernel,
-          ctx,
-          dst,
-          nwarps,
-          0,
-          FATTN_KQ_STRIDE,
-          true,
-          true,
-          false,
-          warp_size);
+
+      launch_fattn<D, cols_per_block, 1,
+                   flash_attn_ext_f16<D, cols_per_block, nwarps,
+                                      get_VKQ_stride(D, nwarps, frag_m),
+                                      KQ_acc_t, use_logit_softcap>>(
+          ctx, dst, nwarps, 0, FATTN_KQ_STRIDE, true, true, false, warp_size);
     }
 }
 
