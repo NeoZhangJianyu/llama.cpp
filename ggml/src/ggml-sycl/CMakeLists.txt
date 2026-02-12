@@ -60,6 +60,9 @@ endif()
 find_package(IntelSYCL)
 if (IntelSYCL_FOUND)
     # Use oneAPI CMake when possible
+    #target_link_options(ggml-sycl PRIVATE -fsycl-targets=spir64)
+    #target_link_options(ggml-sycl PRIVATE -Xsycl-target-backend "-options -ze-intel-enable-auto-large-GRF-mode")
+    #target_link_options(ggml-sycl PRIVATE -Xsycl-target-backend "-options -ze-opt-large-register-file")
     target_link_libraries(ggml-sycl PRIVATE IntelSYCL::SYCL_CXX)
 else()
     # Fallback to the simplest way of enabling SYCL when using intel/llvm nightly for instance

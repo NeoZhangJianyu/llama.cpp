@@ -85,7 +85,7 @@ static void ggml_sycl_flash_attn_ext_mma_f16(ggml_backend_sycl_context & ctx, gg
     const ggml_tensor * K    = dst->src[1];
     const ggml_tensor * V    = dst->src[2];
     const ggml_tensor * mask = dst->src[3];
-
+    printf("zjy ggml_sycl_flash_attn_ext_mma_f16 Q->ne[0]=%d\n", Q->ne[0]);
     switch (Q->ne[0]) {
         case 64:
             GGML_ASSERT(V->ne[0] == 64);
@@ -129,6 +129,7 @@ static void ggml_sycl_flash_attn_ext_mma_f16(ggml_backend_sycl_context & ctx, gg
             GGML_ABORT("fatal error");
             break;
     }
+    printf("zjy ggml_sycl_flash_attn_ext_mma_f16 done\n");
 }
 
 #define FATTN_VEC_CASE(D, type_K, type_V)                                \
@@ -215,6 +216,7 @@ static best_fattn_kernel ggml_sycl_get_best_fattn_kernel(const int device, const
     printf("zjy ggml_sycl_get_best_fattn_kernel1 device=%d\n", device);
     return BEST_FATTN_KERNEL_NONE;
 #endif// FLASH_ATTN_AVAILABLE
+    // return BEST_FATTN_KERNEL_VEC;
 
     const ggml_tensor * Q     = dst->src[0];
     const ggml_tensor * K     = dst->src[1];
@@ -228,6 +230,7 @@ static best_fattn_kernel ggml_sycl_get_best_fattn_kernel(const int device, const
 
     // TODO: temporary until support is extended
     //       https://github.com/ggml-org/llama.cpp/pull/16148#issuecomment-3343525206
+    printf("zjy ggml_sycl_get_best_fattn_kernel K->ne[0]=%d K->ne[1] =%d\n", K->ne[0], K->ne[1] );
     if (K->ne[1] % FATTN_KQ_STRIDE != 0) {
         printf("zjy ggml_sycl_get_best_fattn_kernel 20\n");
         return BEST_FATTN_KERNEL_NONE;
@@ -303,10 +306,12 @@ static best_fattn_kernel ggml_sycl_get_best_fattn_kernel(const int device, const
 
         // Use kernels specialized for small batch sizes if possible:
     if (Q->ne[1] <= 8 && can_use_vector_kernel) {
+    // if (can_use_vector_kernel) {
         printf("zjy ggml_sycl_get_best_fattn_kernel 12\n");
         return BEST_FATTN_KERNEL_VEC;
     }
 
+    // return BEST_FATTN_KERNEL_TILE;
     // For large batch sizes, use the WMMA kernel if possible:
     if (ggml_sycl_should_use_wmma_fattn(cc)) {
         printf("zjy ggml_sycl_get_best_fattn_kernel 13\n");
@@ -318,7 +323,9 @@ static best_fattn_kernel ggml_sycl_get_best_fattn_kernel(const int device, const
 }
 
 void ggml_sycl_flash_attn_ext(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
+    printf("zjy ggml_sycl_flash_attn_ext 0\n");
     ggml_sycl_set_device(ctx.device);
+    // log_ggml_var_device("dst0", (float*)dst->src[0]->data, 100, (dpct::queue_ptr)ctx.stream(), true);
     switch (ggml_sycl_get_best_fattn_kernel(ggml_sycl_get_device(), dst)) {
         case BEST_FATTN_KERNEL_NONE:
             printf("zjy ggml_sycl_flash_attn_ext 1\n");
@@ -340,8 +347,36 @@ void ggml_sycl_flash_attn_ext(ggml_backend_sycl_context & ctx, ggml_tensor * dst
             ggml_sycl_flash_attn_ext_mma_f16(ctx, dst);
             break;
     }
+    printf("zjy ggml_sycl_flash_attn_ext done\n");
 }
 
 bool ggml_sycl_flash_attn_ext_supported(int device, const ggml_tensor * dst) {
     return ggml_sycl_get_best_fattn_kernel(device, dst) != BEST_FATTN_KERNEL_NONE;
+}
+
+
+void print_tensor_data(const char *folder, int index, const ggml_tensor *dst, dpct::queue_ptr stream) {
+    if(GGML_TYPE_Q4_0 != dst->type) {
+            printf("skip print tensor %s type=%d, not Q4\n", dst->name, dst->type);
+            return;
+        }
+        printf("print tensor %s type=%d enum=%d bytenum=%d ne=%d %d %d %d block_size=%d\n", dst->name, dst->type,
+            ggml_nelements(dst), ggml_nbytes(dst), dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],
+            ggml_blck_size(dst->type));
+
+    int *data = (int*)malloc(ggml_nbytes(dst));
+    stream->memcpy(data, dst->data, ggml_nbytes(dst)).wait();
+    char buf[1024];
+    sprintf(buf, "%s/%s_%05d.txt", folder, dst->name, index);
+    FILE *fp=fopen(buf, "w");
+    // for (size_t i=0;i<ggml_nelements(dst);i++) {
+    for (size_t i=0;i<ggml_nbytes(dst)/4;i++) {
+
+        fprintf(fp, "%d ", data[i]);
+        if((i+1) % 20 ==0) fprintf(fp, "\n");
+    }
+    fprintf(fp, "\n");
+    fclose(fp);
+    free(data);
+
 }

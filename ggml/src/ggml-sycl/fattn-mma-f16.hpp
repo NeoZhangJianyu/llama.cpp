@@ -6,7 +6,15 @@
 #include "fattn-common.hpp"
 #include <cmath>
 
+#include <sycl/ext/oneapi/matrix/matrix-unified.hpp>
+#include <sycl/detail/core.hpp>
+#include <sycl/ext/oneapi/matrix/matrix.hpp>
+#include <sycl/kernel_bundle.hpp>
+
+using namespace sycl;
 using namespace ggml_sycl_mma;
+
+namespace matrix = sycl::ext::oneapi::experimental::matrix;
 
 typedef tile<16, 8, sycl::half2> tile_A;
 typedef tile<8, 8, sycl::half2>  tile_B;
@@ -286,10 +294,10 @@ static __dpct_inline__ void flash_attn_ext_f16_load_tile(const sycl::half2 * con
 
         auto load = [&] (auto n) {
             auto      item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
-            const int stride_k = WARP_SIZE >> n;
-            const int k0_start = stride_k == WARP_SIZE ? 0 : chunks_per_row - chunks_per_row % (2*stride_k);
+            const int stride_k = WARP_32_SIZE >> n;
+            const int k0_start = stride_k == WARP_32_SIZE ? 0 : chunks_per_row - chunks_per_row % (2*stride_k);
             const int k0_stop  =                             chunks_per_row - chunks_per_row % (1*stride_k);
-            const int stride_i = WARP_SIZE / stride_k;
+            const int stride_i = WARP_32_SIZE / stride_k;
 
             if (k0_start == k0_stop) {
                 return;
@@ -298,7 +306,7 @@ static __dpct_inline__ void flash_attn_ext_f16_load_tile(const sycl::half2 * con
 #pragma unroll
             for (int i0 = 0; i0 < nbatch_fa; i0 += nwarps*stride_i) {
                 const int i = i0 + item_ct1.get_local_id(1) * stride_i +
-                              (stride_k == WARP_SIZE ? 0 : item_ct1.get_local_id(2) / stride_k);
+                              (stride_k == WARP_32_SIZE ? 0 : item_ct1.get_local_id(2) / stride_k);
 
                 if (i0 + nwarps*stride_i > nbatch_fa && i >= nbatch_fa) {
                     break;
@@ -307,7 +315,7 @@ static __dpct_inline__ void flash_attn_ext_f16_load_tile(const sycl::half2 * con
 #pragma unroll
                 for (int k0 = k0_start; k0 < k0_stop; k0 += stride_k) {
                     const int k =
-                        k0 + (stride_k == WARP_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % stride_k);
+                        k0 + (stride_k == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % stride_k);
 
                     cp_async_cg_16<preload>(tile_KV_32 + i * (stride_tile * sizeof(sycl::half2)) + k * 16,
                                             KV + i * stride_KV + k * h2_per_chunk);
@@ -319,10 +327,10 @@ static __dpct_inline__ void flash_attn_ext_f16_load_tile(const sycl::half2 * con
         static_assert(nbatch_fa % (4*nwarps) == 0, "out of bounds");
         auto load = [&] (const int n) {
             auto      item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
-            const int stride_k = WARP_SIZE >> n;
-            const int k0_start = stride_k == WARP_SIZE ? 0 : D2 - D2 % (2*stride_k);
+            const int stride_k = WARP_32_SIZE >> n;
+            const int k0_start = stride_k == WARP_32_SIZE ? 0 : D2 - D2 % (2*stride_k);
             const int k0_stop  =                             D2 - D2 % (1*stride_k);
-            const int stride_i = WARP_SIZE / stride_k;
+            const int stride_i = WARP_32_SIZE / stride_k;
 
             if (k0_start == k0_stop) {
                 return;
@@ -331,7 +339,7 @@ static __dpct_inline__ void flash_attn_ext_f16_load_tile(const sycl::half2 * con
 #pragma unroll
             for (int i0 = 0; i0 < nbatch_fa; i0 += nwarps*stride_i) {
                 const int i = i0 + item_ct1.get_local_id(1) * stride_i +
-                              (stride_k == WARP_SIZE ? 0 : item_ct1.get_local_id(2) / stride_k);
+                              (stride_k == WARP_32_SIZE ? 0 : item_ct1.get_local_id(2) / stride_k);
 
                 if (i0 + nwarps*stride_i > nbatch_fa && i >= nbatch_fa) {
                     break;
@@ -340,7 +348,7 @@ static __dpct_inline__ void flash_attn_ext_f16_load_tile(const sycl::half2 * con
 #pragma unroll
                 for (int k0 = k0_start; k0 < k0_stop; k0 += stride_k) {
                     const int k =
-                        k0 + (stride_k == WARP_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % stride_k);
+                        k0 + (stride_k == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % stride_k);
 
                     tile_KV[i*stride_tile + k] = KV[i*stride_KV + k];
                 }
@@ -355,11 +363,11 @@ static __dpct_inline__ void flash_attn_ext_f16_load_mask(const sycl::half2 * con
                                                          sycl::half2 * const __restrict__ tile_mask,
                                                          const int stride_mask) {
     auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
-    static_assert(nbatch_fa == 2 * WARP_SIZE || WARP_SIZE % nbatch_fa == 0, "bad KQ_per_iter");
+    static_assert(nbatch_fa == 2 * WARP_32_SIZE || WARP_32_SIZE % nbatch_fa == 0, "bad KQ_per_iter");
 
     if (use_cp_async) {
         constexpr int preload       = nbatch_fa >= 32 ? nbatch_fa * sizeof(sycl::half) : 64;
-        constexpr int cols_per_warp = 8*WARP_SIZE/nbatch_fa;
+        constexpr int cols_per_warp = 8*WARP_32_SIZE/nbatch_fa;
         constexpr int stride_j = nwarps * cols_per_warp;
 
         const unsigned int tile_mask_32 = ggml_sycl_cvta_generic_to_shared(tile_mask);
@@ -367,8 +375,8 @@ static __dpct_inline__ void flash_attn_ext_f16_load_mask(const sycl::half2 * con
 #pragma unroll
         for (int j0 = 0; j0 < ncols1; j0 += stride_j) {
             const int j = j0 + item_ct1.get_local_id(1) * cols_per_warp +
-                          (nbatch_fa == 2 * WARP_SIZE ? item_ct1.get_local_id(2) / (WARP_SIZE / 4) :
-                                                        item_ct1.get_local_id(2) / (WARP_SIZE / cols_per_warp));
+                          (nbatch_fa == 2 * WARP_32_SIZE ? item_ct1.get_local_id(2) / (WARP_32_SIZE / 4) :
+                                                        item_ct1.get_local_id(2) / (WARP_32_SIZE / cols_per_warp));
 
             if (j0 + stride_j > ncols1 && j >= ncols1) {
                 break;
@@ -382,19 +390,19 @@ static __dpct_inline__ void flash_attn_ext_f16_load_mask(const sycl::half2 * con
         return;
     }
 
-    constexpr int cols_per_warp = 2*WARP_SIZE/nbatch_fa;
+    constexpr int cols_per_warp = 2*WARP_32_SIZE/nbatch_fa;
     constexpr int stride_j = nwarps * cols_per_warp;
 #pragma unroll
     for (int j0 = 0; j0 < ncols1; j0 += stride_j) {
         const int j = j0 + item_ct1.get_local_id(1) * cols_per_warp +
-                      (nbatch_fa == 2 * WARP_SIZE ? 0 : item_ct1.get_local_id(2) / (WARP_SIZE / cols_per_warp));
+                      (nbatch_fa == 2 * WARP_32_SIZE ? 0 : item_ct1.get_local_id(2) / (WARP_32_SIZE / cols_per_warp));
 
         if (j0 + stride_j > ncols1 && j >= ncols1) {
             break;
         }
 
-        const int i = nbatch_fa == 2 * WARP_SIZE ? item_ct1.get_local_id(2) :
-                                                   item_ct1.get_local_id(2) % (WARP_SIZE / cols_per_warp);
+        const int i = nbatch_fa == 2 * WARP_32_SIZE ? item_ct1.get_local_id(2) :
+                                                   item_ct1.get_local_id(2) % (WARP_32_SIZE / cols_per_warp);
 
         tile_mask[j*(nbatch_fa/2 + 4) + i] = mask_h2[j*stride_mask + i];
     }
@@ -436,9 +444,16 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
                                                     tile_C_VKQ * const __restrict__ VKQ_C,
                                                     float * const __restrict__ KQ_max,
                                                     float * const __restrict__ KQ_rowsum,
-                                                    const int kb0) {
+                                                    const int kb0,
+                                                    const sycl::stream &out) {
+    auto  item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+ int blockId = item_ct1.get_group(2) + item_ct1.get_group(1) * item_ct1.get_group_range(2) + item_ct1.get_group(0) * item_ct1.get_group_range(2) * item_ct1.get_group_range(1);
+ int threadsPerBlock = item_ct1.get_local_range(2) * item_ct1.get_local_range(1) * item_ct1.get_local_range(0);
+ int threadInBlockId = item_ct1.get_local_id(2) + item_ct1.get_local_id(1) * item_ct1.get_local_range(2) + item_ct1.get_local_id(0) * item_ct1.get_local_range(2) * item_ct1.get_local_range(1);
+ int id = blockId * threadsPerBlock + threadInBlockId;
+
 #ifdef TURING_MMA_AVAILABLE
-    auto                                  item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+
     typedef fattn_mma_f16_config<DKQ, DV> c;
 
 #ifdef CP_ASYNC_AVAILABLE
@@ -469,6 +484,7 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
     tile_C_KQ_16  * KQ_C_16  = (tile_C_KQ_16  *) KQ_C;
 
     if constexpr (nstages > 1) {
+        if(id==256) out <<"IT 10"<< sycl::endl;
         static_assert(!mla, "multi-stage loading not implemented for MLA");
         static_assert(nbatch_K2 == DKQ/2, "batching not implemented for multi stage loading");
         constexpr bool use_cp_async = true;
@@ -480,12 +496,13 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
         flash_attn_ext_f16_load_tile<stride_tile_V, nwarps, c::nbatch_fa, use_cp_async>
             (V_h2 + int64_t(k_VKQ_0)*stride_V, tile_V, nbatch_V2, stride_V);
     } else {
+        if(id==256) out <<"IT 12"<< sycl::endl;
         constexpr bool use_cp_async = nstages == 1;
         if (ncols2 > 1 || mask_h2) {
             flash_attn_ext_f16_load_mask<ncols1, nwarps, c::nbatch_fa, use_cp_async>(mask_h2 + k_VKQ_0/2, tile_mask, stride_mask);
         }
     }
-
+    if(id==256) out <<"IT 2"<< sycl::endl;
 #pragma unroll
     for (int k0_start = 0; k0_start < DKQ/2; k0_start += nbatch_K2) {
         const int k0_stop = k0_start + nbatch_K2 < DKQ/2 ? k0_start + nbatch_K2 : DKQ/2;
@@ -509,9 +526,11 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
 
         // Calculate tile of KQ:
         if constexpr (c::Q_in_reg) {
+            if (id == 256) sycl::ext::oneapi::experimental::printf("IT 6011 KQ_C_16[0].x[0]=%f\n",
+                KQ_C_16[0].x[0]);
 #pragma unroll
             for (int i_KQ_00 = 0; i_KQ_00 < c::nbatch_fa; i_KQ_00 += np*tile_A::I) {
-                const int i_KQ_0 = i_KQ_00 + (threadIdx.y % np)*tile_A::I;
+                const int i_KQ_0 = i_KQ_00 + (item_ct1.get_local_id(1) % np)*tile_A::I;
 #pragma unroll
                 for (int k_KQ_0 = k0_start; k_KQ_0 < k0_stop; k_KQ_0 += tile_A::J) {
                     tile_A K_A;
@@ -522,30 +541,36 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
 #pragma unroll
                         for (int t = 0; t < ntiles/2; ++t) {
                             // Wide version of KQ_C is column-major => swap A and B.
-                            mma(KQ_C_16[i_KQ_00/(np*tile_A::I) * ntiles/2 + t], Q_B_16[k_KQ_0/tile_A::J * ntiles/2 + t], K_A);
+                            if (id == 256) sycl::ext::oneapi::experimental::printf("IT 600 KQ_C_16[0].x[0]=%f %f %f\n",
+                                    KQ_C_16[0].x[0], Q_B_16[0].x[0].x(), K_A.x[0].x());
+                            mma(KQ_C_16[i_KQ_00/(np*tile_A::I) * ntiles/2 + t], Q_B_16[k_KQ_0/tile_A::J * ntiles/2 + t], K_A, id);
+                            if (id == 256) sycl::ext::oneapi::experimental::printf("IT 601 KQ_C_16[0].x[0]=%f %f %f\n",
+                                    KQ_C_16[0].x[0], Q_B_16[0].x[0].x(), K_A.x[0].x());
                         }
                     }
                 }
             }
         } else {
             static_assert(ntiles == 2, "ntiles != 2 not implemented");
+            if (id == 256) sycl::ext::oneapi::experimental::printf("IT 6012 KQ_C_16[0].x[0]=%f\n",
+                KQ_C_16[0].x[0]);
 #pragma unroll
             for (int k_KQ_0 = k0_start; k_KQ_0 < k0_stop; k_KQ_0 += tile_A::J) {
-                load_ldmatrix(Q_B_16[0], tile_Q + (threadIdx.y / np)*(tile_B_16::I*stride_tile_Q) + k_KQ_0, stride_tile_Q);
+                load_ldmatrix(Q_B_16[0], tile_Q + (item_ct1.get_local_id(1) / np)*(tile_B_16::I*stride_tile_Q) + k_KQ_0, stride_tile_Q);
 
 #pragma unroll
                 for (int i_KQ_00 = 0; i_KQ_00 < c::nbatch_fa; i_KQ_00 += np*tile_A::I) {
-                    const int i_KQ_0 = i_KQ_00 + (threadIdx.y % np)*tile_A::I;
+                    const int i_KQ_0 = i_KQ_00 + (item_ct1.get_local_id(1) % np)*tile_A::I;
 
                     tile_A K_A;
                     load_ldmatrix(K_A, tile_K + i_KQ_0*stride_tile_K + (k_KQ_0 - k0_start), stride_tile_K);
 
                     // Wide version of KQ_C is column-major => swap A and B.
-                    mma(KQ_C_16[i_KQ_00/(np*tile_A::I)], Q_B_16[0], K_A);
+                    mma(KQ_C_16[i_KQ_00/(np*tile_A::I)], Q_B_16[0], K_A, id);
                 }
             }
         }
-
+        return;
         if (nstages <= 1) {
             /*
             DPCT1118:21: SYCL group functions and algorithms must be encountered in converged control flow. You may need to adjust the code.
@@ -556,6 +581,10 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
             item_ct1.barrier();  // Only needed if tile_K == tile_V.
         }
     }
+    if(id==256) out <<"IT 3"<< sycl::endl;
+
+    if(id==256) out << "temp "<< DPCT_COMPATIBILITY_TEMP << " " << GGML_SYCL_CC_AMPERE << sycl::endl;
+
 
     if (use_logit_softcap) {
         static_assert(c::nbatch_fa % (np*tile_C_KQ::I) == 0, "bad loop size");
@@ -567,23 +596,24 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
             }
         }
     }
-
-    float KQ_max_new[cols_per_thread];
+    if(id==256) out <<"IT 4"<< sycl::endl;
+    float KQ_max_new[cols_per_thread]={0.0};
 #pragma unroll
     for (int col = 0; col < cols_per_thread; ++col) {
         KQ_max_new[col] = KQ_max[col];
     }
     float KQ_rowsum_add[cols_per_thread] = {0.0f};
+    if(id==256) out <<"IT 5"<< sycl::endl;
 
     if (ntiles == 1) {
         if (ncols2 > 1 || mask_h2) {
 #pragma unroll
             for (int i00 = 0; i00 < c::nbatch_fa; i00 += np*tile_C_KQ::I) {
-                const int i0 = i00 + (threadIdx.y % np)*tile_C_KQ::I;
+                const int i0 = i00 + (item_ct1.get_local_id(1) % np)*tile_C_KQ::I;
 #pragma unroll
                 for (int l = 0; l < tile_C_KQ::ne; ++l) {
                     const int i = i0 + tile_C_KQ::get_i(l);
-                    const int j = ((threadIdx.y / np)*tile_C_KQ::J + tile_C_KQ::get_j(l)) / ncols2;
+                    const int j = ((item_ct1.get_local_id(1) / np)*tile_C_KQ::J + tile_C_KQ::get_j(l)) / ncols2;
 
                     KQ_C[i00/(np*tile_C_KQ::I)].x[l] += slope *
                         __half2float(((const half *) tile_mask)[j*(c::nbatch_fa + 8) + i]);
@@ -613,6 +643,8 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
                                    sycl::ext::oneapi::this_work_item::get_sub_group(), KQ_max_new[col], offset));
             }
         }
+         if (id == 256) sycl::ext::oneapi::experimental::printf("IT 603 KQ_rowsum_add[0]=%f %f\n",
+                KQ_rowsum_add[0], KQ_rowsum_add[1]);
 
         static_assert(c::nbatch_fa % (np*tile_C_KQ::I) == 0, "bad loop size");
 #pragma unroll
@@ -624,23 +656,31 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
                 KQ_rowsum_add[l % 2] += KQ_C[k].x[l];
             }
         }
+
+        if (id == 256) sycl::ext::oneapi::experimental::printf("IT 602 KQ_rowsum_add[0]=%f %f\n",
+                KQ_rowsum_add[0], KQ_rowsum_add[1]);
+
     } else { // ntiles > 1
         if (ncols2 > 1 || mask_h2) {
+            if (id == 256) sycl::ext::oneapi::experimental::printf("IT 6022 KQ_rowsum_add[0]=%f %f %f %f\n",
+                KQ_rowsum_add[0], KQ_rowsum_add[1],
+                KQ_C_16[0].x[0],KQ_max_new[0]);
+
 #pragma unroll
             for (int i00 = 0; i00 < c::nbatch_fa; i00 += np*tile_C_KQ_16::J) {
-                const int i0 = i00 + (threadIdx.y % np)*tile_C_KQ_16::J;
+                const int i0 = i00 + (item_ct1.get_local_id(1) % np)*tile_C_KQ_16::J;
 #pragma unroll
                 for (int t = 0; t < ntiles/2; ++t) {
 #pragma unroll
                     for (int l0 = 0; l0 < tile_C_KQ_16::ne; l0 += 2) {
                         const int i = (i0 + tile_C_KQ_16::get_j(l0)) / 2;
-                        const int j = ((threadIdx.y / np)*cols_per_warp + t*tile_C_KQ_16::I + tile_C_KQ_16::get_i(l0)) / ncols2;
+                        const int j = ((item_ct1.get_local_id(1) / np)*cols_per_warp + t*tile_C_KQ_16::I + tile_C_KQ_16::get_i(l0)) / ncols2;
 
                         const sycl::float2 tmp = tile_mask[j * (c::nbatch_fa / 2 + 4) + i]
                                                      .template convert<float, sycl::rounding_mode::automatic>();
                         const int KQ_index = i00/(np*tile_C_KQ_16::J) * ntiles/2 + t;
-                        KQ_C_16[KQ_index].x[l0 + 0] += slope*tmp.x;
-                        KQ_C_16[KQ_index].x[l0 + 1] += slope*tmp.y;
+                        KQ_C_16[KQ_index].x[l0 + 0] += slope*tmp.x();
+                        KQ_C_16[KQ_index].x[l0 + 1] += slope*tmp.y();
                     }
                 }
             }
@@ -672,6 +712,9 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
                                    sycl::ext::oneapi::this_work_item::get_sub_group(), KQ_max_new[col], offset));
             }
         }
+        if (id == 256) sycl::ext::oneapi::experimental::printf("IT 6021 KQ_rowsum_add[0]=%f %f %f %f\n",
+                KQ_rowsum_add[0], KQ_rowsum_add[1],
+                KQ_C_16[0].x[0],KQ_max_new[0]);
 
         static_assert(c::nbatch_fa % (np*tile_C_KQ_16::J) == 0, "bad loop size");
 #pragma unroll
@@ -689,9 +732,12 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
             }
         }
     }
+    if (id == 256) sycl::ext::oneapi::experimental::printf("IT 60 KQ_rowsum_add[0]=%f %f\n",
+                KQ_rowsum_add[0], KQ_rowsum_add[1]);
 
+    if(id==256) out <<"IT 6"<< sycl::endl;
     {
-        float KQ_max_scale[cols_per_thread];
+        float KQ_max_scale[cols_per_thread]={0.0};
 #pragma unroll
         for (int col = 0; col < cols_per_thread; ++col) {
             const float KQ_max_diff = KQ_max[col] - KQ_max_new[col];
@@ -699,9 +745,13 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
             KQ_max[col] = KQ_max_new[col];
 
             *((uint32_t *) &KQ_max_scale[col]) *= KQ_max_diff >= SOFTMAX_FTZ_THRESHOLD;
+            if (id == 256) sycl::ext::oneapi::experimental::printf("IT 61 KQ_rowsum[0]=%f %f %f %f\n",
+                KQ_rowsum[0], KQ_rowsum[1], KQ_max_scale[0], KQ_rowsum_add[0]);
 
             // Scale previous KQ_rowsum to account for a potential increase in KQ_max:
             KQ_rowsum[col] = KQ_max_scale[col]*KQ_rowsum[col] + KQ_rowsum_add[col];
+            if (id == 256) sycl::ext::oneapi::experimental::printf("IT 611 KQ_rowsum[0]=%f %f %f %f\n",
+                KQ_rowsum[0], KQ_rowsum[1], KQ_max_scale[0], KQ_rowsum_add[0]);
         }
 
         if (ntiles == 1) {
@@ -727,6 +777,7 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
             }
         }
     }
+    if(id==256) out <<"IT 7"<< sycl::endl;
 
     // Convert KQ C tiles into B tiles for VKQ calculation:
     tile_B B[c::nbatch_fa/(np*2*tile_B::J) * ntiles];
@@ -767,6 +818,7 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
         }
     }
 
+    if(id==256) out <<"IT 8"<< sycl::endl;
 
     // For MLA K and V have the same data.
     // Therefore, iterate over V in reverse and re-use the data if possible.
@@ -800,7 +852,7 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
             static_assert((c::nbatch_fa/2) % (np*tile_A::J) == 0, "bad loop size");
 #pragma unroll
             for (int k00 = 0; k00 < c::nbatch_fa/2; k00 += np*tile_A::J) {
-                const int k0 = k00 + (threadIdx.y % np)*tile_A::J;
+                const int k0 = k00 + (item_ct1.get_local_id(1) % np)*tile_A::J;
 
                 tile_A A;
                 load_ldmatrix_trans(A, tile_V_i + 2*k0*stride_tile_V + (i_VKQ_0 - i0_start)/2, stride_tile_V);
@@ -826,6 +878,8 @@ static __dpct_inline__ void flash_attn_ext_f16_iter(const sycl::float2 * const _
             item_ct1.barrier();  // Only needed if tile_K == tile_V.
         }
     }
+    if(id==256) out <<"IT 9 end"<< sycl::endl;
+
 #else
     GGML_UNUSED_VARS(Q_f2, K_h2, V_h2, mask_h2, dstk, dstk_fixup,
         scale, slope, logit_softcap, ne01, ne02,
@@ -868,11 +922,27 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
                                                             const int   jt,
                                                             const int   kb0_start,
                                                             const int   kb0_stop,
+                                                            const sycl::stream &out,
                                                             uint8_t *   dpct_local) {
+  auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+
+//   int id = item_ct1.get_global_id(0) * item_ct1.get_global_range(1) *
+//                item_ct1.get_global_range(2) +
+//            item_ct1.get_global_id(1) * item_ct1.get_global_range(2) +
+//            item_ct1.get_global_id(2);
+ int blockId = item_ct1.get_group(2) + item_ct1.get_group(1) * item_ct1.get_group_range(2) + item_ct1.get_group(0) * item_ct1.get_group_range(2) * item_ct1.get_group_range(1);
+ int threadsPerBlock = item_ct1.get_local_range(2) * item_ct1.get_local_range(1) * item_ct1.get_local_range(0);
+ int threadInBlockId = item_ct1.get_local_id(2) + item_ct1.get_local_id(1) * item_ct1.get_local_range(2) + item_ct1.get_local_id(0) * item_ct1.get_local_range(2) * item_ct1.get_local_range(1);
+ int id = blockId * threadsPerBlock + threadInBlockId;
+
+ if (id == 256)
+    out << "zjy flash_attn_ext_f16_process_tile id=" <<id<< sycl::endl;
+
+
 #ifdef TURING_MMA_AVAILABLE
     //In this kernel Q, K, V are matrices while i, j, k are matrix indices.
 
-    auto                                  item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+
     typedef fattn_mma_f16_config<DKQ, DV> c;
 
 #ifdef CP_ASYNC_AVAILABLE
@@ -909,22 +979,34 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
     tile_B_16     * Q_B_16   = (tile_B_16     *) Q_B;
     tile_C_VKQ_16 * VKQ_C_16 = (tile_C_VKQ_16 *) VKQ_C;
 
-    float KQ_rowsum[cols_per_thread] = {0.0f};
-    float KQ_max[cols_per_thread];
+    float KQ_rowsum[cols_per_thread];// = {0.0f};
+    float KQ_max[cols_per_thread] = {0.0f};;
 #pragma unroll
     for (int col = 0; col < cols_per_thread; ++col) {
         KQ_max[col] = -FLT_MAX/2.0f;
     }
 
+    if (id == 256)
+        out << "T 01 id=" <<id
+        << " cols_per_thread="<<cols_per_thread
+        << " KQ_rowsum[0]="<< (float)KQ_rowsum[0]
+        << " "<<(float)KQ_rowsum[1]
+        <<sycl::endl;
+
+    if (id == 256) sycl::ext::oneapi::experimental::printf("T 011 KQ_rowsum[0]=%f %f\n",
+        KQ_rowsum[0], KQ_rowsum[1]);
+
+   if (id == 256)
+        out << "T 0 id=" <<id<< sycl::endl;
     // Load Q data into tile_Q, either temporarily or permanently.
     // Q in registers is faster, but register pressure is the biggest bottleneck.
     // The loading is done with decreasing granularity for D for better memory bandwidth.
     const sycl::half2 scale_h2 = sycl::half2(scale, scale);
 #pragma unroll
-    for (int stride_k : {WARP_SIZE, WARP_SIZE/2, WARP_SIZE/4}) {
-        const int k0_start  = stride_k == WARP_SIZE ? 0 : DKQ/2 - (DKQ/2) % (2*stride_k);
+    for (int stride_k : {WARP_32_SIZE, WARP_32_SIZE/2, WARP_32_SIZE/4}) {
+        const int k0_start  = stride_k == WARP_32_SIZE ? 0 : DKQ/2 - (DKQ/2) % (2*stride_k);
         const int k0_stop   =                             DKQ/2 - (DKQ/2) % (1*stride_k);
-        const int stride_jc = WARP_SIZE / stride_k;
+        const int stride_jc = WARP_32_SIZE / stride_k;
 
         if (k0_start == k0_stop) {
             continue;
@@ -932,7 +1014,7 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
 
 #pragma unroll
         for (int jc0 = 0; jc0 < ncols; jc0 += nwarps*stride_jc) {
-            const int jc = jc0 + threadIdx.y*stride_jc + (stride_k == WARP_SIZE ? 0 : threadIdx.x / stride_k);
+            const int jc = jc0 + item_ct1.get_local_id(1)*stride_jc + (stride_k == WARP_32_SIZE ? 0 : item_ct1.get_local_id(2) / stride_k);
 
             if (jc0 + nwarps*stride_jc > ncols && jc >= ncols) {
                 break;
@@ -944,17 +1026,30 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
             if (jt*ncols1 + j < ne01) {
 #pragma unroll
                 for (int k0 = k0_start; k0 < k0_stop; k0 += stride_k) {
-                    const int k = k0 + (stride_k == WARP_SIZE ? threadIdx.x : threadIdx.x % stride_k);
+                    const int k = k0 + (stride_k == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % stride_k);
 
                     const float2 tmp = Q_f2[(jt*ncols1 + j)*stride_Q1 + c*stride_Q2 + k];
-                    tile_Q[jc*stride_tile_Q + k] = scale_h2 * make_half2(tmp.x, tmp.y);
+                    tile_Q[jc*stride_tile_Q + k] = scale_h2 * make_half2(tmp.x(), tmp.y());
+                    if (id == 257)  out << "T 981 id=" << id
+                        << " tile_Q="<< tile_Q[0].x()
+                        <<" y="<<tile_Q[0].y()
+                        << " all="<<(jt*ncols1 + j)*stride_Q1 + c*stride_Q2 + k
+                        << " jt="<<jt
+                        << " ncols1="<<ncols1
+                        << " j="<<j
+                        << " stride_Q1="<<stride_Q1
+                        << " c="<<c
+                        << " stride_Q2="<<stride_Q2
+                        << " k="<<k
+                        << " " <<sycl::endl;
                 }
             } else {
 #pragma unroll
                 for (int k0 = k0_start; k0 < k0_stop; k0 += stride_k) {
-                    const int k = k0 + (stride_k == WARP_SIZE ? threadIdx.x : threadIdx.x % stride_k);
+                    const int k = k0 + (stride_k == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % stride_k);
 
                     tile_Q[jc*stride_tile_Q + k] = make_half2(0.0f, 0.0f);
+                    if (id == 257)  out << "T 982 id=" << id << sycl::endl;
                 }
             }
         }
@@ -963,6 +1058,9 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
     /*
     DPCT1065:59: Consider replacing sycl::nd_item::barrier() with sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better performance if there is no access to global memory.
     */
+    if (id == 256) out << "T 1 id=" <<id
+       <<" ntiles="<<ntiles << sycl::endl;
+
     item_ct1.barrier();
 
     if (c::Q_in_reg) {
@@ -981,11 +1079,17 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
             }
         }
     }
-
+    if (id == 256)
+        out << "T 2 id=" <<id<< sycl::endl;
     /*
     DPCT1065:60: Consider replacing sycl::nd_item::barrier() with sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better performance if there is no access to global memory.
     */
     item_ct1.barrier();
+    if (id == 256)
+        out << "T 21 id=" <<id
+        << " Q_B_16[0]=" << Q_B_16[0].x[0]
+        << sycl::endl;
+
 
     // Preload mask and K data for first iteration when using cp_async with multiple stages:
     if constexpr (nstages > 1) {
@@ -998,22 +1102,55 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
         flash_attn_ext_f16_load_tile<stride_tile_K, nwarps, c::nbatch_fa, use_cp_async>
             (K_h2 + int64_t(kb0_start)*c::nbatch_fa*stride_K, tile_K, nbatch_K2, stride_K);
     }
+    if (id == 256)
+        out << "T 3 id=" <<id<< sycl::endl;
 
     // Iterate over ne11 == previous tokens:
     int kb0 = kb0_start;
+    if (id == 256)
+        out << "T 31 kb0=" <<kb0 << " "
+        <<kb0_stop<<" "
+        << sycl::endl;
+
+    if (id == 256) sycl::ext::oneapi::experimental::printf("T 211 KQ_rowsum[0]=%f %f\n",
+        KQ_rowsum[0], KQ_rowsum[1]);
+
     for (; kb0 < kb0_stop-1; ++kb0) {
         constexpr bool last_iter = false;
+        if (id == 257)  out << "T 975 id=" << id << sycl::endl;
         flash_attn_ext_f16_iter<DKQ, DV, ncols1, ncols2, nwarps, ntiles, use_logit_softcap, mla, needs_fixup, is_fixup, last_iter>
             (Q_f2, K_h2, V_h2, mask_h2, dstk, dstk_fixup, scale, slope, logit_softcap,
-             ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C, KQ_max, KQ_rowsum, kb0);
-    }
-    { // kb0_start is always < kb0_stop so the last iter can be executed unconditionally.
-        constexpr bool last_iter = true;
-        flash_attn_ext_f16_iter<DKQ, DV, ncols1, ncols2, nwarps, ntiles, use_logit_softcap, mla, needs_fixup, is_fixup, last_iter>
-            (Q_f2, K_h2, V_h2, mask_h2, dstk, dstk_fixup, scale, slope, logit_softcap,
-             ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C, KQ_max, KQ_rowsum, kb0);
+             ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C, KQ_max, KQ_rowsum, kb0, out);
     }
 
+    if (id == 256)
+        out << "T 32 id=" <<id
+        << " KQ_rowsum[0]="<< KQ_rowsum[0]
+        << " "<<KQ_rowsum[1]
+        <<sycl::endl;
+    if (id == 256) sycl::ext::oneapi::experimental::printf("T 321 KQ_rowsum[0]=%f %f\n",
+        KQ_rowsum[0], KQ_rowsum[1]);
+
+    if (id == 256)
+        out << "T 4 id=" <<id<< sycl::endl;
+
+    { // kb0_start is always < kb0_stop so the last iter can be executed unconditionally.
+        constexpr bool last_iter = true;
+        if (id == 257)  out << "T 974 id=" << id << sycl::endl;
+        flash_attn_ext_f16_iter<DKQ, DV, ncols1, ncols2, nwarps, ntiles, use_logit_softcap, mla, needs_fixup, is_fixup, last_iter>
+            (Q_f2, K_h2, V_h2, mask_h2, dstk, dstk_fixup, scale, slope, logit_softcap,
+             ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C, KQ_max, KQ_rowsum, kb0, out);
+    }
+    if (id == 256)
+        out << "T 5 id=" <<id<< sycl::endl;
+
+    if (id == 256)
+        out << "T 51 id=" <<id
+        << " KQ_rowsum[0]="<< KQ_rowsum[0]
+        << " "<<KQ_rowsum[1]
+        <<sycl::endl;
+    if (id == 256) sycl::ext::oneapi::experimental::printf("T 511 KQ_rowsum[0]=%f %f\n",
+        KQ_rowsum[0], KQ_rowsum[1]);
     // With multi-stage loading there is no __syncthreads at the end of the iter,
     //     there can be a race condition on shared memory access for combining/writing back results.
     if (nstages > 1 && nwarps*cols_per_warp > c::nbatch_fa) {
@@ -1025,6 +1162,8 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
         */
         item_ct1.barrier();
     }
+   if (id == 256)
+        out << "T 6 id=" <<id<< sycl::endl;
 
     // Finally, sum up partial KQ rowsums.
     // The partial sums are spread across 8/4 threads each, does not need full reduce.
@@ -1035,11 +1174,24 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
         for (int col = 0; col < cols_per_thread; ++col) {
 #pragma unroll
             for (int offset = offset_first; offset >= offset_last; offset >>= 1) {
-                KQ_rowsum[col] += __shfl_xor_sync(0xFFFFFFFF, KQ_rowsum[col], offset, WARP_SIZE);
+                // KQ_rowsum[col] += __shfl_xor_sync(0xFFFFFFFF, KQ_rowsum[col], offset, WARP_32_SIZE);
+                KQ_rowsum[col] += (float)dpct::permute_sub_group_by_xor(
+                      sycl::ext::oneapi::this_work_item::get_sub_group(),
+                      KQ_rowsum[col], offset, WARP_32_SIZE);
+
             }
         }
     }
+   if (id == 256)
+        out << "T 7 id=" <<id<< sycl::endl;
 
+    if (id == 256)
+        out << "T 71 id=" <<id
+        << " KQ_rowsum[0]="<< KQ_rowsum[0]
+        << " "<<KQ_rowsum[1]
+        <<sycl::endl;
+    if (id == 256) sycl::ext::oneapi::experimental::printf("T 711 KQ_rowsum[0]=%f %f\n",
+        KQ_rowsum[0], KQ_rowsum[1]);
     // If attention sinks are used, potentially re-scale if KQ_max is small.
     // Also add the sink as a value to KQ_rowsum, this is done after synchonization of KQ_rowsum
     //     so it's being done unconditionally for every thread.
@@ -1089,17 +1241,24 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
     // Combine VKQ accumulator values if np > 1.
     // It's also faster to do small writes to shared memory, then large write to VRAM than to do small writes to VRAM.
     // So also write VKQ accumulators to shared memory in column-major format if np == 1.
-
+   if (id == 256)
+        out << "T 8 id=" <<id
+        << " KQ_rowsum[0]="<< KQ_rowsum[0]
+        // << " "<<KQ_rowsum[1]
+        <<sycl::endl;
+    if (id == 256) sycl::ext::oneapi::experimental::printf("T 811 KQ_rowsum[0]=%f %f\n",
+        KQ_rowsum[0], KQ_rowsum[1]);
     constexpr int nbatch_combine = c::get_nbatch_combine_device(ncols);
     constexpr int tile_stride    = nbatch_combine + 4;
     static_assert((DV/2) % nbatch_combine == 0, "bad nbatch_combine");
 
     if constexpr (ntiles == 1) {
-        const int jc_cwmo = (threadIdx.x % (2*tile_C_VKQ::J)) / tile_C_VKQ::J; // jc combine write meta offset
-        const int jc_cwm = threadIdx.y*(2*tile_C_VKQ::J) + 2*tile_C_VKQ::get_j(-1) + jc_cwmo; // jc combine write meta
+        if (id == 257)  out << "T 973 id=" << id << sycl::endl;
+        const int jc_cwmo = (item_ct1.get_local_id(2) % (2*tile_C_VKQ::J)) / tile_C_VKQ::J; // jc combine write meta offset
+        const int jc_cwm = item_ct1.get_local_id(1)*(2*tile_C_VKQ::J) + 2*tile_C_VKQ::get_j(-1) + jc_cwmo; // jc combine write meta
         const sycl::float2 KQ_cmr = make_float2(KQ_max[jc_cwmo], KQ_rowsum[jc_cwmo]);  // KQ combine max rowsum
 
-        if (((!needs_fixup && !is_fixup) || np > 1) && threadIdx.x < 2*tile_C_VKQ::J) {
+        if (((!needs_fixup && !is_fixup) || np > 1) && item_ct1.get_local_id(2) < 2*tile_C_VKQ::J) {
             // Use the 16 bytes of padding in each row to store the meta data: KQ max, KQ rowsum, KQ max scale.
             ((sycl::float2 *) tile_Q)[jc_cwm * (tile_stride / 2) + nbatch_combine / 2] = KQ_cmr;
         }
@@ -1111,21 +1270,23 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
 
         if (np == 1) {
             // No combination is needed, the meta data can be directly written from registers to VRAM.
-            if (needs_fixup && threadIdx.x < tile_B::I) {
+            if (needs_fixup && item_ct1.get_local_id(2) < tile_B::I) {
                 sycl::float2 * dstk_fixup_meta = dstk_fixup + item_ct1.get_group(2) * ncols;
                 dstk_fixup_meta[jc_cwm] = KQ_cmr;
             }
-            if (is_fixup && threadIdx.x < tile_B::I) {
+            if (is_fixup && item_ct1.get_local_id(2) < tile_B::I) {
                 sycl::float2 * dstk_fixup_meta =
                     dstk_fixup + (item_ct1.get_group_range(2) + item_ct1.get_group(2)) * ncols;
                 dstk_fixup_meta[jc_cwm] = KQ_cmr;
             }
         }
     } else {
+        if (id == 257)  out << "T 972 id=" << id << sycl::endl;
+
         static_assert(ntiles == 2 || ntiles == 4, "bad ntiles");
-        const int jc_cwm = threadIdx.y*cols_per_warp // jc combine write meta
-            + (ntiles == 4 ? ((threadIdx.x % 4) / 2) * tile_C_VKQ_16::I : 0)
-            + tile_C_VKQ_16::get_i(threadIdx.x % 4);
+        const int jc_cwm = item_ct1.get_local_id(1)*cols_per_warp // jc combine write meta
+            + (ntiles == 4 ? ((item_ct1.get_local_id(2) % 4) / 2) * tile_C_VKQ_16::I : 0)
+            + tile_C_VKQ_16::get_i(item_ct1.get_local_id(2) % 4);
         const sycl::float2 KQ_cmr =
             make_float2(KQ_max[item_ct1.get_local_id(2) % cols_per_thread],
                         KQ_rowsum[item_ct1.get_local_id(2) % cols_per_thread]);  // KQ combine max rowsum
@@ -1154,57 +1315,83 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
             }
         }
     }
+   if (id == 256)
+        out << "T 9 id=" <<id<< sycl::endl;
 
     static_assert(np == 1 || ntiles == 1 || ntiles == 2, "bad ntiles");
-    if (np > 1 && item_ct1.get_local_id(1) % np == 0) {
+    if (id == 257)
+        out << "T 91 id=" <<id<<" "
+        <<" np="<<np
+        <<" item_ct1.get_local_id(1)="<<item_ct1.get_local_id(1)
+        << sycl::endl;
+    // if (np<1) out << "T id="<<id <<" np="<<np<<sycl::endl;
+
+    if (np > 1 && (item_ct1.get_local_id(1) % np == 0)) {
+    // if (np > 1 ) {
+        if (id == 257)
+            out << "T 9940 id==" << id << sycl::endl;
+        // return;
+        // if (id == 256)
+        // out << "T 994 id=" <<id<< sycl::endl;
+
         // Combine the meta data for parallel warps via shared memory.
-        // Warps with threadIdx.y % np != 0 must NOT return early.
+        // Warps with item_ct1.get_local_id(1) % np != 0 must NOT return early.
         // All threads must return simultaneously to avoid race conditions with work on the next tile.
 
-        constexpr int nmeta = np*cols_per_warp >= WARP_SIZE ? np*cols_per_warp/WARP_SIZE : 1;
+        constexpr int nmeta = np*cols_per_warp >= WARP_32_SIZE ? np*cols_per_warp/WARP_32_SIZE : 1;
 
         const int jc_meta = item_ct1.get_local_id(1) * cols_per_warp +
-                            (np * cols_per_warp < WARP_SIZE ? item_ct1.get_local_id(2) % (np * cols_per_warp) :
+                            (np * cols_per_warp < WARP_32_SIZE ? item_ct1.get_local_id(2) % (np * cols_per_warp) :
                                                               item_ct1.get_local_id(2));
+
         sycl::float2 * const meta_ptr = ((sycl::float2 *) tile_Q) + jc_meta * (tile_stride / 2) + nbatch_combine / 2;
+        if (id == 257)
+            out << "T 9941 id==" << id <<" nmeta="<<nmeta
+            <<" jc="<<jc_meta * (tile_stride / 2) + nbatch_combine / 2<< sycl::endl;
+
         sycl::float2         meta[nmeta];
+
 #pragma unroll
         for (int imeta = 0; imeta < nmeta; ++imeta) {
-            meta[imeta] = meta_ptr[imeta * WARP_SIZE * tile_stride/2];
+            meta[imeta] = meta_ptr[imeta * WARP_32_SIZE * tile_stride/2];
         }
+        if (id == 257)  out << "T 97 id=" <<id<< " meta[imeta]="<< meta[0].x() <<" y="
+        << meta[0].y()<<sycl::endl;
+         return;
 
-        float KQ_cmn = meta[0].x; // KQ combine max new, max between all parallel warps.
+        float KQ_cmn = meta[0].x(); // KQ combine max new, max between all parallel warps.
 #pragma unroll
         for (int imeta = 1; imeta < nmeta; ++imeta) {
-            KQ_cmn = sycl::fmax(KQ_cmn, (float) (meta[imeta].x));
+            KQ_cmn = sycl::fmax(KQ_cmn, (float) (meta[imeta].x()));
         }
 #pragma unroll
         for (int offset = np*cols_per_warp/2; offset >= cols_per_warp; offset >>= 1) {
-            if (offset < WARP_SIZE) {
+            if (offset < WARP_32_SIZE) {
                 KQ_cmn = sycl::fmax(KQ_cmn, dpct::permute_sub_group_by_xor(
                                                 sycl::ext::oneapi::this_work_item::get_sub_group(), KQ_cmn, offset));
             }
         }
+        if (id == 256)  out << "T 98 id=" <<id<< sycl::endl;
 
-        float KQ_cms[nmeta]; // KQ combine max scale per warp.
+        float KQ_cms[nmeta]={0}; // KQ combine max scale per warp.
 #pragma unroll
         for (int imeta = 0; imeta < nmeta; ++imeta) {
-            KQ_cms[imeta] = sycl::native::exp((float) (meta[imeta].x - KQ_cmn));
+            KQ_cms[imeta] = sycl::native::exp((float) (meta[imeta].x() - KQ_cmn));
         }
 
-        float KQ_crs = KQ_cms[0]*meta[0].y; // KQ combine rowsum, scaled sum of all parallel warps.
+        float KQ_crs = KQ_cms[0]*meta[0].y(); // KQ combine rowsum, scaled sum of all parallel warps.
 #pragma unroll
         for (int imeta = 1; imeta < nmeta; ++imeta) {
-            KQ_crs += KQ_cms[imeta]*meta[imeta].y;
+            KQ_crs += KQ_cms[imeta]*meta[imeta].y();
         }
 #pragma unroll
         for (int offset = np*cols_per_warp/2; offset >= cols_per_warp; offset >>= 1) {
-            if (offset < WARP_SIZE) {
+            if (offset < WARP_32_SIZE) {
                 KQ_crs +=
                     dpct::permute_sub_group_by_xor(sycl::ext::oneapi::this_work_item::get_sub_group(), KQ_crs, offset);
             }
         }
-
+        if (id == 256)  out << "T 99 id=" <<id<< sycl::endl;
         /*
         DPCT1118:27: SYCL group functions and algorithms must be encountered in converged control flow. You may need to adjust the code.
         */
@@ -1216,26 +1403,27 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
         // Write back combined meta data:
 #pragma unroll
         for (int imeta = 0; imeta < nmeta; ++imeta) {
-            if (np * cols_per_warp >= WARP_SIZE || item_ct1.get_local_id(2) < np * cols_per_warp) {
+            if (np * cols_per_warp >= WARP_32_SIZE || item_ct1.get_local_id(2) < np * cols_per_warp) {
                 // Combined KQ max scale + rowsum.
-                meta_ptr[imeta * WARP_SIZE * tile_stride/2] = make_float2(KQ_cms[imeta], KQ_crs);
+                meta_ptr[imeta * WARP_32_SIZE * tile_stride/2] = make_float2(KQ_cms[imeta], KQ_crs);
             }
         }
 
         // Combined KQ max + rowsum.
-        static_assert(cols_per_warp <= WARP_SIZE);
-        if (needs_fixup && (cols_per_warp == WARP_SIZE || item_ct1.get_local_id(2) < cols_per_warp)) {
+        static_assert(cols_per_warp <= WARP_32_SIZE);
+        if (needs_fixup && (cols_per_warp == WARP_32_SIZE || item_ct1.get_local_id(2) < cols_per_warp)) {
             sycl::float2 * dstk_fixup_meta = dstk_fixup + item_ct1.get_group(2) * ncols;
             dstk_fixup_meta[(item_ct1.get_local_id(1) / np) * cols_per_warp + item_ct1.get_local_id(2)] =
                 sycl::float2(KQ_cmn, KQ_crs);
         }
-        if (is_fixup && (cols_per_warp == WARP_SIZE || item_ct1.get_local_id(2) < cols_per_warp)) {
+        if (is_fixup && (cols_per_warp == WARP_32_SIZE || item_ct1.get_local_id(2) < cols_per_warp)) {
             sycl::float2 * dstk_fixup_meta = dstk_fixup + (item_ct1.get_group_range(2) + item_ct1.get_group(2)) * ncols;
             dstk_fixup_meta[(item_ct1.get_local_id(1) / np) * cols_per_warp + item_ct1.get_local_id(2)] =
                 sycl::float2(KQ_cmn, KQ_crs);
         }
     } else if (np > 1) {
-        // Warps with threadIdx.y % np == 0 execute a __syncthreads() in the if branch.
+        return;
+        // Warps with item_ct1.get_local_id(1) % np == 0 execute a __syncthreads() in the if branch.
         // Therefore, all other warps also need to execute a __syncthreads().
         // Otherwise the points at which warps synchronize with each other would become misaligned.
         /*
@@ -1244,13 +1432,23 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
         /*
         DPCT1065:65: Consider replacing sycl::nd_item::barrier() with sycl::nd_item::barrier(sycl::access::fence_space::local_space) for better performance if there is no access to global memory.
         */
+       if (id ==256)
+        out << "T 990 id=" <<id<< sycl::endl;
+       return;
         item_ct1.barrier();
+    } else {
+        if (id == 256)
+        out << "T 991 id=" <<id<< sycl::endl;
+        return;
     }
+    if (id < 256)
+        out << "T 10 id=" <<id<< sycl::endl;
+    return;
 
 #pragma unroll
     for (int k00 = 0; k00 < DV/2; k00 += nbatch_combine) {
         if (ntiles == 1) {
-            const int jc_cwd = threadIdx.y*tile_B::I + tile_B::get_i(-1); // jc combine write data
+            const int jc_cwd = item_ct1.get_local_id(1)*tile_B::I + tile_B::get_i(-1); // jc combine write data
 #pragma unroll
             for (int k0 = 0; k0 < nbatch_combine; k0 += tile_B::J) {
                 const tile_B B = get_transposed(VKQ_C[(k00 + k0)/tile_B::J]); // Conversion of C to B matrix puts it in column-major format.
@@ -1265,7 +1463,7 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
         } else {
 #pragma unroll
             for (int t = 0; t < ntiles/2; ++t) {
-                const int j0 = threadIdx.y*cols_per_warp + t*tile_C_VKQ_16::I;
+                const int j0 = item_ct1.get_local_id(1)*cols_per_warp + t*tile_C_VKQ_16::I;
 #pragma unroll
                 for (int k0 = 0; k0 < nbatch_combine; k0 += tile_C_VKQ_16::J) {
 #pragma unroll
@@ -1288,16 +1486,16 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
         item_ct1.barrier();
 
         if (np == 1 || item_ct1.get_local_id(1) % np == 0) {
-            // The first 2*2*gridDim.x*ncols floats in dstk_fixup are for storing max. values and row sums.
+            // The first 2*2*item_ct1.get_group_range(2)*ncols floats in dstk_fixup are for storing max. values and row sums.
             // The values after that are for the partial results of the individual blocks.
             sycl::float2 * dstk_fixup_data =
                 dstk_fixup + item_ct1.get_group_range(2) * (2 * ncols) + item_ct1.get_group(2) * (ncols * (DV / 2));
 
 #pragma unroll
-            for (int stride_k : {WARP_SIZE, WARP_SIZE/2, WARP_SIZE/4}) {
-                const int k0_start  = stride_k == WARP_SIZE ? 0 : nbatch_combine - nbatch_combine % (2*stride_k);
+            for (int stride_k : {WARP_32_SIZE, WARP_32_SIZE/2, WARP_32_SIZE/4}) {
+                const int k0_start  = stride_k == WARP_32_SIZE ? 0 : nbatch_combine - nbatch_combine % (2*stride_k);
                 const int k0_stop   =                             nbatch_combine - nbatch_combine % (1*stride_k);
-                const int stride_jc = WARP_SIZE / stride_k;
+                const int stride_jc = WARP_32_SIZE / stride_k;
 
                 if (k0_start == k0_stop) {
                     continue;
@@ -1305,7 +1503,7 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
 
 #pragma unroll
                 for (int jc0_dst = 0; jc0_dst < ncols; jc0_dst += (nwarps/np)*stride_jc) {
-                    const int jc_dst = jc0_dst + (threadIdx.y/np)*stride_jc + (stride_k == WARP_SIZE ? 0 : threadIdx.x / stride_k);
+                    const int jc_dst = jc0_dst + (item_ct1.get_local_id(1)/np)*stride_jc + (stride_k == WARP_32_SIZE ? 0 : item_ct1.get_local_id(2) / stride_k);
 
                     if (jc0_dst + (nwarps/np)*stride_jc > ncols && jc_dst >= ncols) {
                         break;
@@ -1323,21 +1521,21 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
                     const float * meta_j = (const float *) tile_Q + jc_tile_K*tile_stride + nbatch_combine;
 #pragma unroll
                     for (int k0 = k0_start; k0 < k0_stop; k0 += stride_k) {
-                        const int k = k0 + (stride_k == WARP_SIZE ? threadIdx.x : threadIdx.x % stride_k);
+                        const int k = k0 + (stride_k == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % stride_k);
 
                         float2 dstk_val = make_float2(0.0f, 0.0f);
 #pragma unroll
                         for (int ip = 0; ip < np; ++ip) {
                             const float KQ_crs = np == 1 ? 1.0f : meta_j[ip*cols_per_warp * tile_stride + 0];
                             const float2 dstk_val_add = __half22float2(tile_Q[(jc_tile_K + ip*cols_per_warp) * tile_stride + k]);
-                            dstk_val.x += dstk_val_add.x*KQ_crs;
-                            dstk_val.y += dstk_val_add.y*KQ_crs;
+                            dstk_val.x() += dstk_val_add.x()*KQ_crs;
+                            dstk_val.y() += dstk_val_add.y()*KQ_crs;
                         }
 
                         if (!needs_fixup && !is_fixup) {
                             const float KQ_rowsum_j = meta_j[1];
-                            dstk_val.x /= KQ_rowsum_j;
-                            dstk_val.y /= KQ_rowsum_j;
+                            dstk_val.x() /= KQ_rowsum_j;
+                            dstk_val.y() /= KQ_rowsum_j;
                         }
 
                         if (is_fixup) {
@@ -1359,6 +1557,7 @@ static __dpct_inline__ void flash_attn_ext_f16_process_tile(const sycl::float2 *
             item_ct1.barrier();
         }
     }
+    if(id==256) out << "zjy flash_attn_ext_f16_process_tile done"<<sycl::endl;
 #else
     GGML_UNUSED_VARS(Q_f2, K_h2, V_h2, mask_h2, sinks_f, dstk, dstk_fixup,
         scale, slope, logit_softcap, ne01, ne02,
@@ -1416,8 +1615,22 @@ static void flash_attn_ext_f16(
     const int32_t nb32,
     const int64_t nb33,
     const sycl::nd_item<3>& item_ct1,
+    const sycl::stream &out,
     uint8_t* lsm) {
-  uint8_t* dpct_local = lsm;
+//   int id = item_ct1.get_global_id(0) * item_ct1.get_global_range(1) *
+//                item_ct1.get_global_range(2) +
+//            item_ct1.get_global_id(1) * item_ct1.get_global_range(2) +
+//            item_ct1.get_global_id(2);
+int blockId = item_ct1.get_group(2) + item_ct1.get_group(1) * item_ct1.get_group_range(2) + item_ct1.get_group(0) * item_ct1.get_group_range(2) * item_ct1.get_group_range(1);
+ int threadsPerBlock = item_ct1.get_local_range(2) * item_ct1.get_local_range(1) * item_ct1.get_local_range(0);
+ int threadInBlockId = item_ct1.get_local_id(2) + item_ct1.get_local_id(1) * item_ct1.get_local_range(2) + item_ct1.get_local_id(0) * item_ct1.get_local_range(2) * item_ct1.get_local_range(1);
+ int id = blockId * threadsPerBlock + threadInBlockId;
+
+
+  if (id == 0)
+    out << "flash_attn_ext_f16" << sycl::endl;
+
+   uint8_t* dpct_local = lsm;
     //   static_cast<uint8_t*>(syclex::get_work_group_scratch_memory());
 
 #if defined(FLASH_ATTN_AVAILABLE) && defined(TURING_MMA_AVAILABLE)
@@ -1452,12 +1665,23 @@ static void flash_attn_ext_f16(
     const int iter_j = (ne01 + (ncols1 - 1)) / ncols1;
 
     constexpr int kb_niter = FATTN_KQ_STRIDE / c::nbatch_fa; // Number of kernel iterations per assigned KQ slice.
+    if (id == 0) out << "Z 0" << sycl::endl;
+
 
     // kbc == k block continuous, current index in continuous ijk space.
     int kbc = (item_ct1.get_group(2) + 0) * (iter_k * iter_j * (ne02 / ncols2) * ne03) / item_ct1.get_group_range(2);
     const int kbc_stop =
         (item_ct1.get_group(2) + 1) * (iter_k * iter_j * (ne02 / ncols2) * ne03) / item_ct1.get_group_range(2);
-
+    if (id == 256) out << "kbc_stop "
+        <<kbc_stop <<" "
+        << item_ct1.get_group(2) << " "
+        <<iter_k <<" "
+        <<iter_j <<" "
+        <<ne02 <<" "
+        <<ncols2 <<" "
+        <<ne03 <<" "
+        <<item_ct1.get_group_range(2) <<" "
+        <<sycl::endl;
     // If the seams of 2 SYCL blocks fall within an output tile their results need to be combined.
     // For this we need to track both the block that starts the tile (needs_fixup) and the block that finishes the tile (is_fixup).
     // In the most general case >2 seams can fall into the same tile.
@@ -1465,8 +1689,18 @@ static void flash_attn_ext_f16(
     // kb0 == k start index when in the output tile.
     int kb0_start = kbc % iter_k;
     int kb0_stop  = sycl::min(iter_k, kb0_start + kbc_stop - kbc);
+    // if (id == 0)out <<"Z 1"<<sycl::endl;
+
+    if (id == 256) out <<"Z 1 kbc="<< kbc <<" kbc_stop="<<kbc_stop
+            << " kb0_stop="<<kb0_stop<< " iter_k="<<iter_k
+            <<sycl::endl;
 
     while (kbc < kbc_stop && kb0_stop == iter_k) {
+
+        if (id == 256) out <<"Z 2 kbc="<< kbc <<" kbc_stop="<<kbc_stop
+            << " kb0_stop="<<kb0_stop<< " iter_k="<<iter_k
+            <<sycl::endl;
+        // return;
         const int sequence = kbc / (iter_k*iter_j*(ne02/ncols2));
         const int zt = (kbc - iter_k*iter_j*(ne02/ncols2)*sequence) / (iter_k*iter_j); // head in units of ncols2
         const int jt = (kbc - iter_k*iter_j*(ne02/ncols2)*sequence - iter_k*iter_j*zt) / iter_k; // j index of current tile.
@@ -1495,17 +1729,21 @@ static void flash_attn_ext_f16(
 
         constexpr bool is_fixup = false; // All but (potentially) the last iterations write their data to dst rather than the fixup buffer.
         if (kb0_start == 0) {
+            if (id == 256) out <<"Z 21"<<sycl::endl;
+
             constexpr bool needs_fixup = false; // SYCL block is working on an entire tile.
             flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, ntiles, use_logit_softcap, mla,
                                             needs_fixup, is_fixup>(
                 Q_f2, K_h2, V_h2, mask_h2, sinks_f, dstk, dst_meta, scale, slope, logit_softcap, ne01, ne02, stride_Q1,
-                stride_Q2, stride_K, stride_V, stride_mask, jt, kb0_start_kernel, kb0_stop_kernel, dpct_local);
+                stride_Q2, stride_K, stride_V, stride_mask, jt, kb0_start_kernel, kb0_stop_kernel, out, dpct_local);
         } else {
+            if (id == 256) out <<"Z 22"<<sycl::endl;
+
             constexpr bool needs_fixup = true; // SYCL block is working on the beginning of a tile.
             flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, ntiles, use_logit_softcap, mla,
                                             needs_fixup, is_fixup>(
                 Q_f2, K_h2, V_h2, mask_h2, sinks_f, dstk, dst_meta, scale, slope, logit_softcap, ne01, ne02, stride_Q1,
-                stride_Q2, stride_K, stride_V, stride_mask, jt, kb0_start_kernel, kb0_stop_kernel, dpct_local);
+                stride_Q2, stride_K, stride_V, stride_mask, jt, kb0_start_kernel, kb0_stop_kernel, out, dpct_local);
         }
 
         kbc += iter_k;
@@ -1513,12 +1751,16 @@ static void flash_attn_ext_f16(
 
         kb0_start = 0;
         kb0_stop  = sycl::min(iter_k, kbc_stop - kbc);
+        break;
     }
+
+    if (id == 256) out <<"Z 3"<<sycl::endl;
 
     if (kbc >= kbc_stop) {
+        if (id == 256) out <<"Z 31"<<sycl::endl;
         return;
     }
-
+    if (id == 256) out <<"Z 4"<<sycl::endl;
     const int sequence = kbc / (iter_k*iter_j*(ne02/ncols2));
     const int zt = (kbc - iter_k*iter_j*(ne02/ncols2)*sequence) / (iter_k*iter_j); // head in units of ncols2
     const int jt = (kbc - iter_k*iter_j*(ne02/ncols2)*sequence - iter_k*iter_j*zt) / iter_k; // j index of current tile.
@@ -1526,6 +1768,20 @@ static void flash_attn_ext_f16(
     const int head0 = zt * ncols2;
 
     const sycl::float2 * Q_f2 = (const sycl::float2 *) (Q + nb03 * sequence + nb02 * head0);
+    if (id == 256) out <<"Z Q+="<<nb03 * sequence + nb02 * head0
+    <<" Q_f2="<<Q_f2[0].x()
+    <<" y="<<Q_f2[0].y()
+      <<sycl::endl;
+    // <<" Q="<<(int)Q[0]
+    // << " "<<(int)Q[1]
+    // << " "<<(int)Q[2]
+    // << " "<<(int)Q[3]
+    // << " "<<(int)Q[4]
+    // << " "<<(int)Q[5]
+    // << " "<<(int)Q[6]
+    // << " "<<(int)Q[7]
+    // <<sycl::endl;
+
     const sycl::half2 *  K_h2 = (const sycl::half2 *) (K + nb13 * sequence + nb12 * (head0 / gqa_ratio));
     const sycl::half2 *  mask_h2 =
         ncols2 == 1 && !mask ? nullptr : (const sycl::half2 *) (mask + nb33 * (sequence % ne33) + nb31 * jt * ncols1);
@@ -1546,10 +1802,12 @@ static void flash_attn_ext_f16(
 
     constexpr bool is_fixup = true; // Last index writes its data to fixup buffer to avoid data races with other blocks.
     constexpr bool needs_fixup = false;
+    if (id == 256)out <<"Z 5"<<sycl::endl;
     flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, ntiles, use_logit_softcap, mla, needs_fixup,
                                     is_fixup>(Q_f2, K_h2, V_h2, mask_h2, sinks_f, dstk, dst_meta, scale, slope,
                                               logit_softcap, ne01, ne02, stride_Q1, stride_Q2, stride_K, stride_V,
-                                              stride_mask, jt, kb0_start_kernel, kb0_stop_kernel, dpct_local);
+                                              stride_mask, jt, kb0_start_kernel, kb0_stop_kernel, out, dpct_local);
+    if (id == 256)out <<"Z 6"<<sycl::endl;
 #else
     GGML_UNUSED_VARS(Q, K, V, mask, sinks, KV_max, dst, dst_meta, scale,
         max_bias, m0, m1, n_head_log2, logit_softcap,
@@ -1579,6 +1837,8 @@ void ggml_sycl_flash_attn_ext_mma_f16_case(ggml_backend_sycl_context & ctx, ggml
     typedef fattn_mma_f16_config<DKQ, DV> c;
 
     const int nstages = cp_async_available(cc) ? c::nstages_target : 0;
+    printf("zjy nstages=%d cp_async_available(cc)=%d ncols1=%d ncols2=%d\n",
+        nstages, cp_async_available(cc), ncols1, ncols2);
 
     constexpr int ncols         = ncols1 * ncols2;
     constexpr int ntiles        = ncols <= 8 ? 1 : 2; // Number of tiles per warp.
@@ -1608,6 +1868,7 @@ void ggml_sycl_flash_attn_ext_mma_f16_case(ggml_backend_sycl_context & ctx, ggml
     const size_t nbytes_shared_total = std::max(nbytes_shared_combine, c::Q_in_reg ?
         std::max(nbytes_shared_Q,  nbytes_shared_KV + nbytes_shared_mask) :
                  nbytes_shared_Q + nbytes_shared_KV + nbytes_shared_mask);
+    printf("zjy ggml_sycl_flash_attn_ext_mma_f16_case nbytes_shared_total=%ld\n", nbytes_shared_total);
 
     float logit_softcap;
     memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
@@ -1615,6 +1876,7 @@ void ggml_sycl_flash_attn_ext_mma_f16_case(ggml_backend_sycl_context & ctx, ggml
     // fattn_kernel_t fattn_kernel;
     if (logit_softcap == 0.0f) {
       constexpr bool use_logit_softcap = false;
+      printf("zjy ggml_sycl_flash_attn_ext_mma_f16_case use_logit_softcap = false\n");
       launch_fattn<DV, ncols1, ncols2,
                    flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, nwarps, ntiles,
                                       use_logit_softcap, mla>>(
@@ -1622,12 +1884,14 @@ void ggml_sycl_flash_attn_ext_mma_f16_case(ggml_backend_sycl_context & ctx, ggml
           true);
     } else {
       constexpr bool use_logit_softcap = true;
+      printf("zjy ggml_sycl_flash_attn_ext_mma_f16_case use_logit_softcap = true\n");
       launch_fattn<DV, ncols1, ncols2,
                    flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, nwarps, ntiles,
                                       use_logit_softcap, mla>>(
           ctx, dst, nwarps, nbytes_shared_total, FATTN_KQ_STRIDE, true, true,
           true);
     }
+    printf("zjy ggml_sycl_flash_attn_ext_mma_f16_case end\n");
 }
 
 

@@ -85,11 +85,11 @@ static ggml_sycl_device_info ggml_sycl_init() {
 
         info.devices[i].cc =
             100 * prop.get_major_version() + 10 * prop.get_minor_version();
-        info.devices[i].nsm = prop.get_max_compute_units();
+        info.devices[i].nsm = prop.get_max_compute_units()/16; //Xe Cores
         info.devices[i].opt_feature.reorder = device.ext_oneapi_architecture_is(syclex::arch_category::intel_gpu);
         info.devices[i].smpbo = prop.get_local_mem_size();
         info.max_work_group_sizes[i] = prop.get_max_work_group_size();
-        info.devices[i].max_wg_per_cu = info.max_work_group_sizes[i] / info.devices[i].nsm;
+        info.devices[i].max_wg_per_cu = info.max_work_group_sizes[i] / info.devices[i].nsm/16;
 
         std::vector<size_t> sub_group_sizes = device.get_info<sycl::info::device::sub_group_sizes>();
         info.devices[i].warp_size = sub_group_sizes.back(); //last is max.
@@ -3551,7 +3551,9 @@ catch (sycl::exception const &exc) {
   std::exit(1);
 }
 
-static bool ggml_sycl_compute_forward(ggml_backend_sycl_context & ctx, struct ggml_tensor * dst) try {
+static bool ggml_sycl_compute_forward(ggml_backend_sycl_context & ctx, struct ggml_tensor * dst)
+// try
+{
     if (!g_sycl_loaded) return false;
 
     if (dst->src[0] != nullptr && ggml_backend_buffer_is_sycl_split(dst->src[0]->buffer)) {
@@ -3790,11 +3792,12 @@ static bool ggml_sycl_compute_forward(ggml_backend_sycl_context & ctx, struct gg
     }
 
     return true;
-} catch (sycl::exception & e) {
-    std::cerr << e.what() << "Exception caught at file:" << __FILE__ << ", line:" << __LINE__ << std::endl;
-    std::cerr << "Error OP "<<ggml_op_name(dst->op)<< std::endl;
-    std::exit(1);
 }
+// catch (sycl::exception & e) {
+//     std::cerr << e.what() << "Exception caught at file:" << __FILE__ << ", line:" << __LINE__ << std::endl;
+//     std::cerr << "Error OP "<<ggml_op_name(dst->op)<< std::endl;
+//     std::exit(1);
+// }
 
 GGML_API void ggml_backend_sycl_get_device_description(int device, char *description,
                                       size_t description_size) try {

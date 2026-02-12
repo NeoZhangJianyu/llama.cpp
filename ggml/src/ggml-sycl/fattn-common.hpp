@@ -10,9 +10,11 @@
 
 #include <cstdint>
 #include <cmath>
+#include <float.h>
+
 
 #define FATTN_KQ_STRIDE       256
-#define HALF_MAX_HALF         __float2half(65504.0f/2) // Use neg. of this instead of -INFINITY to initialize KQ max vals to avoid NaN upon subtraction.
+#define HALF_MAX_HALF         sycl::half(65504.0f/2) // Use neg. of this instead of -INFINITY to initialize KQ max vals to avoid NaN upon subtraction.
 #define SOFTMAX_FTZ_THRESHOLD -20.0f                   // Softmax exp. of values smaller than this are flushed to zero to avoid NaNs.
 
 typedef void (*fattn_kernel_t)(
@@ -54,6 +56,7 @@ typedef void (*fattn_kernel_t)(
     const int32_t nb32,
     const int64_t nb33,
     const sycl::nd_item<3> & item_ct1,
+    const sycl::stream &out,
     uint8_t* lsm);
 
 typedef float (*vec_dot_KQ_t)(
@@ -98,6 +101,12 @@ static __dpct_inline__ float vec_dot_fattn_vec_KQ_q4_0(const char * __restrict__
                                                        const int * __restrict__ Q_q8,
                                                        const void * __restrict__ Q_ds_v) {
     auto               item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+     int blockId = item_ct1.get_group(2) + item_ct1.get_group(1) * item_ct1.get_group_range(2) + item_ct1.get_group(0) * item_ct1.get_group_range(2) * item_ct1.get_group_range(1);
+ int threadsPerBlock = item_ct1.get_local_range(2) * item_ct1.get_local_range(1) * item_ct1.get_local_range(0);
+ int threadInBlockId = item_ct1.get_local_id(2) + item_ct1.get_local_id(1) * item_ct1.get_local_range(2) + item_ct1.get_local_id(0) * item_ct1.get_local_range(2) * item_ct1.get_local_range(1);
+ int id = blockId * threadsPerBlock + threadInBlockId;
+ int idx = Q_q8[0];
+
     const block_q4_0 * K_q4_0   = (const block_q4_0 *) K_c;
     GGML_UNUSED(Q_v);
 
@@ -106,7 +115,7 @@ static __dpct_inline__ float vec_dot_fattn_vec_KQ_q4_0(const char * __restrict__
 #pragma unroll
     for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
         const int k_KQ =
-            k_KQ_0 + (nthreads == WARP_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads);
+            k_KQ_0 + (nthreads == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads);
 
         const int ib    = k_KQ /  QI8_1;
         const int iqs4  = k_KQ %  QI4_0;
@@ -121,6 +130,14 @@ static __dpct_inline__ float vec_dot_fattn_vec_KQ_q4_0(const char * __restrict__
 
         const sycl::float2 Q_ds = ((const sycl::float2 *) Q_ds_v)[k_KQ_0 / nthreads];
         sum += __half2float(K_q4_0[ib].d) * (sumi*Q_ds.x() - (8/QI8_1)*Q_ds.y());
+        // if(id==0) {
+        //     sycl::ext::oneapi::experimental::printf("voc Q4 id=%d %d %d %d %f iqs4=%d %d ib=%d .d=%f\n", id,
+        //         sumi, v, u, sum, iqs4, k_KQ, ib, K_q4_0[ib].d);
+        //     sycl::ext::oneapi::experimental::printf("qs[%d] %d %d %d %d %d %d %d %d\n",ib,
+        //         K_q4_0[ib].qs[0],K_q4_0[ib].qs[1],K_q4_0[ib].qs[2],K_q4_0[ib].qs[3],
+        //         K_q4_0[ib].qs[4],K_q4_0[ib].qs[5],K_q4_0[ib].qs[6],K_q4_0[ib].qs[7]);
+
+        // }
     }
 
     return sum;
@@ -140,7 +157,7 @@ static __dpct_inline__ float vec_dot_fattn_vec_KQ_q4_1(const char * __restrict__
 #pragma unroll
     for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
         const int k_KQ =
-            k_KQ_0 + (nthreads == WARP_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads);
+            k_KQ_0 + (nthreads == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads);
 
         const int ib    = k_KQ /  QI8_1;
         const int iqs4  = k_KQ %  QI4_1;
@@ -176,7 +193,7 @@ static __dpct_inline__ float vec_dot_fattn_vec_KQ_q5_0(const char * __restrict__
 #pragma unroll
     for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
         const int k_KQ =
-            k_KQ_0 + (nthreads == WARP_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads);
+            k_KQ_0 + (nthreads == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads);
 
         const int ib    = k_KQ /  QI8_1;
         const int iqs4  = k_KQ %  QI5_0;
@@ -224,7 +241,7 @@ static __dpct_inline__ float vec_dot_fattn_vec_KQ_q5_1(const char * __restrict__
 #pragma unroll
     for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
         const int k_KQ =
-            k_KQ_0 + (nthreads == WARP_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads);
+            k_KQ_0 + (nthreads == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads);
 
         const int ib    = k_KQ /  QI8_1;
         const int iqs4  = k_KQ %  QI5_1;
@@ -273,7 +290,7 @@ static __dpct_inline__ float vec_dot_fattn_vec_KQ_q8_0(const char * __restrict__
 #pragma unroll
     for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
         const int k_KQ =
-            k_KQ_0 + (nthreads == WARP_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads);
+            k_KQ_0 + (nthreads == WARP_32_SIZE ? item_ct1.get_local_id(2) : item_ct1.get_local_id(2) % nthreads);
 
         const int ib  = k_KQ / QI8_0;
         const int iqs = k_KQ % QI8_0;
@@ -296,11 +313,16 @@ static __dpct_inline__ void quantize_q8_1_to_shared(const float * __restrict__ x
                                                     int * __restrict__ yq32,
                                                     void * __restrict__ yds) {
     auto  item_ct1          = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    int id = item_ct1.get_global_id(0) * item_ct1.get_global_range(1) *
+                         item_ct1.get_global_range(2) +
+                     item_ct1.get_global_id(1) * item_ct1.get_global_range(2) +
+                     item_ct1.get_global_id(2);
+
     float vals[sizeof(int)] = { 0.0f };
 #pragma unroll
     for (int l = 0; l < int(sizeof(int)); ++l) {
         vals[l] =
-            (ni == WARP_SIZE || item_ct1.get_local_id(2) < ni) ? scale * x[4 * item_ct1.get_local_id(2) + l] : 0.0f;
+            (ni == WARP_32_SIZE || item_ct1.get_local_id(2) < ni) ? scale * x[4 * item_ct1.get_local_id(2) + l] : 0.0f;
     }
 
     float amax = sycl::fabs(vals[0]);
@@ -329,11 +351,21 @@ static __dpct_inline__ void quantize_q8_1_to_shared(const float * __restrict__ x
     }
 
     yq32[item_ct1.get_local_id(2)] = q32;
-    if (item_ct1.get_local_id(2) % QI8_1 == 0 && (ni == WARP_SIZE || item_ct1.get_local_id(2) < ni)) {
+    if (item_ct1.get_local_id(2) % QI8_1 == 0 && (ni == WARP_32_SIZE || item_ct1.get_local_id(2) < ni)) {
         if (std::is_same<Tds, sycl::half2>::value) {
             ((sycl::half2  *) yds)[item_ct1.get_local_id(2)/QI8_1] =  make_half2(d, sum);
         } else {
             ((sycl::float2 *) yds)[item_ct1.get_local_id(2)/QI8_1] = make_float2(d, sum);
+            //  if (id == 1)
+        //   sycl::ext::oneapi::experimental::printf(
+        //       "zjy quan yds=%p yds.x=%p yds.y=%p x=%f y=%f iy=%i\n",
+        //       &((sycl::float2 *) yds)[item_ct1.get_local_id(2)/QI8_1],
+        //       &(((sycl::float2 *) yds)[item_ct1.get_local_id(2)/QI8_1]).x(),
+        //       &(((sycl::float2 *) yds)[item_ct1.get_local_id(2)/QI8_1]).y(),
+        //       ((sycl::float2 *) yds)[item_ct1.get_local_id(2)/QI8_1].x(),
+        //       ((sycl::float2 *) yds)[item_ct1.get_local_id(2)/QI8_1].y(),
+        //        yq32[item_ct1.get_local_id(2)]);
+
         }
     }
 }
@@ -626,7 +658,7 @@ static void flash_attn_mask_to_KV_max(const sycl::half2 * __restrict__ mask,
 
     mask += sequence*s33 + jt*ncols1*s31;
 
-    if (tid < WARP_SIZE) {
+    if (tid < WARP_32_SIZE) {
         buf_iw[tid] = 1;
     }
     item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -642,20 +674,20 @@ static void flash_attn_mask_to_KV_max(const sycl::half2 * __restrict__ mask,
             all_inf = all_inf && int(sycl::isinf((float) (tmp.x()))) && int(sycl::isinf((float) (tmp.y())));
         }
 
-        all_inf = warp_reduce_all(all_inf);
-        if (tid % WARP_SIZE == 0) {
-            buf_iw[tid / WARP_SIZE] = all_inf;
+        all_inf = warp_reduce_all<WARP_32_SIZE>(all_inf);
+        if (tid % WARP_32_SIZE == 0) {
+            buf_iw[tid / WARP_32_SIZE] = all_inf;
         }
         /*
         DPCT1118:3: SYCL group functions and algorithms must be encountered in converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
-        all_inf = buf_iw[tid % WARP_SIZE];
+        all_inf = buf_iw[tid % WARP_32_SIZE];
         /*
         DPCT1118:4: SYCL group functions and algorithms must be encountered in converged control flow. You may need to adjust the code.
         */
         item_ct1.barrier(sycl::access::fence_space::local_space);
-        all_inf = warp_reduce_all(all_inf);
+        all_inf = warp_reduce_all<WARP_32_SIZE>(all_inf);
 
         if (!all_inf) {
             break;
@@ -827,7 +859,7 @@ static void flash_attn_combine_results(const float * __restrict__ VKQ_parts,
     dst[tid] = VKQ_numerator / VKQ_denominator;
 }
 
-template <fattn_kernel_t fattn_kernel>
+template <fattn_kernel_t fattn_kernel, int warp_size>
 static void lauch_kernel(
     dpct::dim3 group_range,
     dpct::dim3 local_range,
@@ -874,27 +906,48 @@ static void lauch_kernel(
         uint8_t *lsm = NULL;
         sycl::local_accessor<uint8_t, 1> scale_local_acc(
             sycl::range<1>(local_mem_size), cgh);
+        sycl::stream out(512000, 512, cgh);
         cgh.parallel_for(
             sycl::nd_range<3>(
                 static_cast<sycl::range<3>>(group_range * local_range),
                 static_cast<sycl::range<3>>(local_range)),
-            [=](sycl::nd_item<3> item_ct1) {
+            [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(warp_size/*zjy todo for more GPUs*/)]] {
                 fattn_kernel(Q, K, V, mask, sinks, KV_max, dst, dst_meta, scale,
                              max_bias, m0, m1, n_head_log2, logit_softcap, ne00,
                              ne01, ne02, ne03, nb01, nb02, nb03, ne10, ne11,
                              ne12, ne13, nb11, nb12, nb13, nb21, nb22, nb23,
                              ne31, ne32, ne33, nb31, nb32, nb33,
                              (const sycl::nd_item<3>)item_ct1,
+                             out,
                              (uint8_t *)get_pointer(scale_local_acc));
             });
     });
 }
 
-template <int DV, int ncols1, int ncols2, fattn_kernel_t fattn_kernel>
+// void print_tensor_data(const char *folder, int index, ggml_tensor *dst) {
+
+//         printf("prt %p\n", dst->data);
+//         int *data = (int*)dst->data;
+//         char buf[1024];
+//         sprintf(buf, "%s/%05d.txt", folder, index);
+//         FILE *fp=fopen(buf, "w");
+//         for (size_t i=0;i<ggml_nelements(dst)/ggml_blck_size(dst->type)*18/8;i++) {
+//             fprintf(fp, "%d ", data[i]);
+//             if((i+1) % 20 ==0) fprintf(fp, "\n");
+//         }
+//         fprintf(fp, "\n");
+//         fclose(fp);
+
+
+//     }
+
+void print_tensor_data(const char *folder, int index, const ggml_tensor *dst, dpct::queue_ptr stream);
+
+
+template <int DV, int ncols1, int ncols2, fattn_kernel_t fattn_kernel, int warp_size = WARP_32_SIZE>
 void launch_fattn(
     ggml_backend_sycl_context & ctx, ggml_tensor * dst, const int nwarps, const size_t nbytes_shared,
-    const int KQ_row_granularity, const bool need_f16_K, const bool need_f16_V, const bool stream_k, const int warp_size = WARP_SIZE
-) {
+    const int KQ_row_granularity, const bool need_f16_K, const bool need_f16_V, const bool stream_k) {
 
     // dpct::queue_ptr  q = ctx.stream();
     // const dpct::dim3 blocks_num1(1,1, 1);
@@ -1036,7 +1089,7 @@ void launch_fattn(
                 /*
               DPCT1101:70: 'WARP_SIZE' expression was replaced with a value. Modify the code to use the original expression, provided in comments, if it is correct.
               */
-                sycl::local_accessor<int, 1> buf_iw_acc_ct1(sycl::range<1>(32 /*WARP_SIZE*/), cgh);
+                sycl::local_accessor<int, 1> buf_iw_acc_ct1(sycl::range<1>(WARP_32_SIZE), cgh);
 
                 auto mask_data_ct0  = (const sycl::half2 *) mask->data;
                 auto KV_max_ptr_ct1 = KV_max.ptr;
@@ -1063,7 +1116,7 @@ void launch_fattn(
     // Max. number of active blocks limited by occupancy.
     int max_blocks_per_sm = ggml_sycl_info().devices[id].max_wg_per_cu;
     int parallel_blocks = max_blocks_per_sm;
-
+    printf("zjy common parallel_blocks=%d\n", parallel_blocks);
     dpct::dim3 blocks_num;
     if (stream_k) {
         // For short contexts it can be faster to have the SMs work on whole tiles because this lets us skip the fixup.
@@ -1074,6 +1127,8 @@ void launch_fattn(
         const int nblocks_stream_k = max_blocks;
 
         const bool use_stream_k = true;// cc >= GGML_CUDA_CC_ADA_LOVELACE || tiles_efficiency_percent < 75;
+        printf("zjy nblocks_stream_k=%d ntiles_total=%d use_stream_k=%d  max_blocks_per_sm=%d nsm=%d\n",
+            nblocks_stream_k, ntiles_total, use_stream_k,  max_blocks_per_sm, nsm);
 
         blocks_num.x = use_stream_k ? nblocks_stream_k : ntiles_total;
         blocks_num.y = 1;
@@ -1086,7 +1141,10 @@ void launch_fattn(
 
         // parallel_blocks must not be larger than what the tensor size allows:
         parallel_blocks = std::min(parallel_blocks, ntiles_KQ);
+        //todo fix the hard code change
+        // parallel_blocks = ntiles_KQ;
 
+        printf("zjy common parallel_blocks=%d ntiles_KQ=%d  K->ne[1]=%d KQ_row_granularity=%d\n", parallel_blocks, ntiles_KQ,  K->ne[1], KQ_row_granularity );
         // If ntiles_total % blocks_per_wave != 0 then some efficiency is lost due to tail effects.
         // Test whether parallel_blocks can be set to a higher value for better efficiency.
         const int blocks_per_wave = nsm * max_blocks_per_sm;
@@ -1106,6 +1164,7 @@ void launch_fattn(
                 nwaves_best = nwaves;
                 efficiency_percent_best = efficiency_percent;
                 parallel_blocks = parallel_blocks_test;
+                printf("zjy common parallel_blocks1=%d\n", parallel_blocks);
             }
         }
 
@@ -1138,8 +1197,14 @@ void launch_fattn(
     const float m1 = powf(2.0f, -(max_bias / 2.0f) / n_head_log2);
 
     GGML_ASSERT(block_dim.x % warp_size == 0);
+    printf("launch_fattn block num %d %d %d dim %d %d %d warp_size+=%d\n", blocks_num.x, blocks_num.y,blocks_num.z,
+     block_dim.x, block_dim.y,block_dim.z, warp_size);
+    // printf("zjy mask ne %d %d %d %d\n", mask->ne[0], mask->ne[1], mask->ne[2], mask->ne[3]);
 
-    lauch_kernel<fattn_kernel>(
+    // print_tensor_data("tensor", 0, K, main_stream);
+    // print_tensor_data("tensor", 0, K, main_stream);
+    // const int warp_size1 = warp_size;
+    lauch_kernel<fattn_kernel, warp_size>(
         blocks_num, block_dim, main_stream, (unsigned int) nbytes_shared, (const char *) Q->data, K_data, V_data,
         mask ? ((const char *) mask->data) : nullptr, sinks ? ((const char *) sinks->data) : nullptr, KV_max.ptr,
         !stream_k && parallel_blocks > 1 ? dst_tmp.ptr : (float *) KQV->data, (sycl::float2 *)dst_tmp_meta.ptr, scale, max_bias, m0, m1,

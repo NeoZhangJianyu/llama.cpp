@@ -72,5 +72,6 @@ static_assert(K_QUANTS_PER_ITERATION == 1 || K_QUANTS_PER_ITERATION == 2, "K_QUA
 
 #define QK_WARP_SIZE 32
 #define WARP_32_SIZE 32
+#define WARP_16_SIZE 16
 
 #endif // GGML_SYCL_PRESETS_HPP

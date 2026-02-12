@@ -40,28 +40,63 @@
 #include <thread>
 #include <vector>
 
+void print_data(const char *folder, char *name, int index, uint8_t *data, int size){
+    char buf[1024];
+    sprintf(buf, "%s/%s_%05d.txt", folder, name, index);
+    FILE *fp=fopen(buf, "w");
+    // for (size_t i=0;i<ggml_nelements(dst);i++) {
+    for (size_t i=0;i<size;i++) {
+
+        fprintf(fp, "%d ", data[i]);
+        if((i+1) % 20 ==0) fprintf(fp, "\n");
+    }
+    fprintf(fp, "\n");
+    fclose(fp);
+    printf("save to %s\n", buf);
+}
+
+void print_float_data(const char *folder, char *name, int index, float *data, int size){
+    char buf[1024];
+    sprintf(buf, "%s/%s_%05d.txt", folder, name, index);
+    FILE *fp=fopen(buf, "w");
+    // for (size_t i=0;i<ggml_nelements(dst);i++) {
+    for (size_t i=0;i<size;i++) {
+
+        fprintf(fp, "%f ", data[i]);
+        if((i+1) % 20 ==0) fprintf(fp, "\n");
+    }
+    fprintf(fp, "\n");
+    fclose(fp);
+    printf("save to %s\n", buf);
+}
+
 static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float max = 1.0f) {
     size_t nels = ggml_nelements(tensor);
     std::vector<float> data(nels);
     {
         // parallel initialization
-        static const size_t n_threads = std::thread::hardware_concurrency();
+        static const size_t n_threads = 1;//std::thread::hardware_concurrency();
         // static RNG initialization (revisit if n_threads stops being constant)
         static std::vector<std::default_random_engine> generators = []() {
             std::random_device rd;
             std::vector<std::default_random_engine> vec;
             vec.reserve(n_threads);
-            //for (size_t i = 0; i < n_threads; i++) { vec.emplace_back(1234 + i); } // fixed seed
-            for (size_t i = 0; i < n_threads; i++) { vec.emplace_back(rd()); }
+            for (size_t i = 0; i < n_threads; i++) { vec.emplace_back(1234 + i); } // fixed seed
+            // for (size_t i = 0; i < n_threads; i++) { vec.emplace_back(rd()); }
             return vec;
         }();
 
         auto init_thread = [&](size_t ith, size_t start, size_t end) {
             std::uniform_real_distribution<float> distribution(min, max);
             auto & gen = generators[ith];
+            //printf("\n");
             for (size_t i = start; i < end; i++) {
                 data[i] = distribution(gen);
+                // data[i] = i/1000.0;
+                // printf("%f ", data[i]);
+                // if (i+1 % 20==0) printf("\n");
             }
+	    // printf("\n");
         };
 
         std::vector<std::future<void>> tasks;
@@ -93,6 +128,7 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
         }
 
         std::vector<uint8_t> dataq(ggml_row_size(tensor->type, nels));
+        // printf("dataq type=%d size=%d\n", tensor->type, ggml_row_size(tensor->type, nels));
         {
             // parallel quantization by block
             size_t blck_size = ggml_blck_size(tensor->type);
@@ -104,8 +140,8 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
             };
 
             const size_t min_blocks_per_thread = 1;
-            const size_t n_threads = std::min<size_t>(std::thread::hardware_concurrency()/2,
-                                                      std::max<size_t>(1, n_blocks / min_blocks_per_thread));
+            const size_t n_threads = 1;//std::min<size_t>(std::thread::hardware_concurrency()/2,
+                                                     // std::max<size_t>(1, n_blocks / min_blocks_per_thread));
             std::vector<std::future<void>> tasks;
             tasks.reserve(n_threads);
             for (size_t i = 0; i < n_threads; i++) {
@@ -117,6 +153,8 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
                 t.get();
             }
         }
+        // print_data("tensor", tensor->name, 1, dataq.data(), dataq.size());
+        // print_float_data("tensor", tensor->name, 2, data.data(), data.size());
         ggml_backend_tensor_set(tensor, dataq.data(), 0, dataq.size());
     } else if (tensor->type == GGML_TYPE_I8 || tensor->type == GGML_TYPE_I16 || tensor->type == GGML_TYPE_I32) {
         // This is going to create some weird integers though.
@@ -145,7 +183,8 @@ static void init_tensor_kq_mask(ggml_tensor * tensor, float min = -1.0f, float m
     std::uniform_real_distribution<float> dis(min, max);
 
     for (size_t i = 0; i < data_f32.size(); i++) {
-        data_f32[i] = dis(gen);
+        // data_f32[i] = dis(gen);
+        data_f32[i] = i/1000.0;
     }
 
     // block size
@@ -156,10 +195,15 @@ static void init_tensor_kq_mask(ggml_tensor * tensor, float min = -1.0f, float m
     const int n_inf_blocks = 0.1*(ne0*ne1*ne2*ne3)/(blck0*blck1);
 
     for (int b = 0; b < n_inf_blocks; b++) {
-        const int p3 = (rd() % ne3);
-        const int p2 = (rd() % ne2);
-        const int p1 = (rd() % ne1);
-        const int p0 = (rd() % ne0);
+        const int p3 = (b % ne3);
+        const int p2 = (b % ne2);
+        const int p1 = (b % ne1);
+        const int p0 = (b % ne0);
+
+        // const int p3 = (rd() % ne3);
+        // const int p2 = (rd() % ne2);
+        // const int p1 = (rd() % ne1);
+        // const int p0 = (rd() % ne0);
 
         for (int i1 = 0; i1 < blck1 && p1 + i1 < ne1; i1++) {
             const int idx = p3*ne2*ne1*ne0 + p2*ne1*ne0 + (p1 + i1)*ne0 + p0;
@@ -5134,6 +5178,7 @@ struct test_flash_attn_ext : public test_case {
         if (mask) {
             m = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, kv, GGML_PAD(nb, GGML_KQ_MASK_PAD), 1, nr23[1]);
             ggml_set_name(m, "m");
+	    printf("zjy add mask\n");
         }
 
         ggml_tensor * s = nullptr;
@@ -5141,24 +5186,33 @@ struct test_flash_attn_ext : public test_case {
             s = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, q->ne[2]);
             ggml_set_name(s, "s");
         }
-
+        // printf("zjy build_graph ggml_flash_attn_ext\n");
         ggml_tensor * out = ggml_flash_attn_ext(ctx, q, k, v, m, 1.0f/sqrtf(hsk), max_bias, logit_softcap);
+        // printf("zjy build_graph ggml_flash_attn_ext 01\n");
         ggml_flash_attn_ext_add_sinks(out, s);
+        // printf("zjy build_graph ggml_flash_attn_ext 02\n");
         ggml_flash_attn_ext_set_prec (out, prec);
+        // printf("zjy build_graph ggml_flash_attn_ext 03\n");
         ggml_set_name(out, "out");
-
+        // printf("zjy build_graph ggml_flash_attn_ext 04\n");
         return out;
     }
 
     void initialize_tensors(ggml_context * ctx) override {
+        // int idx=0;
+        // idx++;
         for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
             if (strcmp(t->name, "s") == 0) {
                 // make the sink values more noticable in order to trigger a test failure when the implementation is wrong
                 init_tensor_uniform(t, -10.0f, 10.0f);
+                // printf("init_tensor_uniform -10 10 %s\n", t->name);
             } else if (strcmp(t->name, "m") == 0) {
                 init_tensor_kq_mask(t);
+                // printf("init_tensor_kq_mask %s\n", t->name);
             } else {
                 init_tensor_uniform(t);
+                // printf("init_tensor_uniform %s\n", t->name);
+                // print_tensor_data("tensor", idx, t);
             }
         }
     }
@@ -5772,6 +5826,20 @@ static const ggml_type other_types[] = {
 static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     std::vector<std::unique_ptr<test_case>> test_cases;
     std::default_random_engine rng(0);
+
+    // test_cases.emplace_back(new test_flash_attn_ext(
+    //     40, 40, 4, {1, 1}, 256, 1, 1, 1, 0.0, 0.0, GGML_PREC_F32, GGML_TYPE_Q8_0, {0, 1, 2, 3}));
+    // // FLASH_ATTN_EXT(hsk=40,hsv=40,nh=4,nr23=[1,3],kv=512,nb=32,mask=1,sinks=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=q8_0,permute=[0,1,2,3])
+    // test_cases.emplace_back(new test_flash_attn_ext(
+    //     40, 40, 4, {1, 3}, 512, 32, 1, 1, 0.0, 0.0, GGML_PREC_F32, GGML_TYPE_Q8_0, {0, 1, 2, 3}));
+
+    // FLASH_ATTN_EXT(hsk=40,hsv=40,nh=4,nr23=[1,3],kv=512,nb=3,mask=1,sinks=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=q4_0,permute=[0,1,2,3]): FAIL
+    // test_cases.emplace_back(new test_flash_attn_ext(
+    //     40, 40, 4, {1, 3}, 512, 3, 1, 1, 0.0, 0.0, GGML_PREC_F32, GGML_TYPE_Q4_0, {0, 1, 2, 3}));
+
+    // FLASH_ATTN_EXT(hsk=80,hsv=80,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,sinks=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]):
+    test_cases.emplace_back(new test_flash_attn_ext(
+        80, 80, 4, {1, 1}, 512, 1, 1, 1, 0.0, 0.0, GGML_PREC_F32, GGML_TYPE_F16, {0, 1, 2, 3}));
 
     // unary ops
     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32}) {
@@ -6780,13 +6848,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                                                 for (ggml_prec prec : {GGML_PREC_F32, GGML_PREC_DEFAULT}) {
                                                     if (hsk != 128 && prec == GGML_PREC_DEFAULT) continue;
                                                     for (ggml_type type_KV : {GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
-                                                        test_cases.emplace_back(new test_flash_attn_ext(
-                                                                    hsk, hsv, nh, {nr2, nr3}, kv, nb, mask, sinks, max_bias, logit_softcap, prec, type_KV));
+                                                        // test_cases.emplace_back(new test_flash_attn_ext(
+                                                                    // hsk, hsv, nh, {nr2, nr3}, kv, nb, mask, sinks, max_bias, logit_softcap, prec, type_KV));
                                                         // run fewer test cases permuted
-                                                        if (mask == true && max_bias == 0.0f && logit_softcap == 0 && kv == 512) {
-                                                            test_cases.emplace_back(new test_flash_attn_ext(
-                                                                        hsk, hsv, nh, {nr2, nr3}, kv, nb, mask, sinks, max_bias, logit_softcap, prec, type_KV, {0, 2, 1, 3}));
-                                                        }
+                                                        // if (mask == true && max_bias == 0.0f && logit_softcap == 0 && kv == 512) {
+                                                        //     test_cases.emplace_back(new test_flash_attn_ext(
+                                                        //                 hsk, hsv, nh, {nr2, nr3}, kv, nb, mask, sinks, max_bias, logit_softcap, prec, type_KV, {0, 2, 1, 3}));
+                                                        // }
                                                     }
                                                 }
                                             }
@@ -6800,6 +6868,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             }
         }
     }
+
+    //FLASH_ATTN_EXT(hsk=40,hsv=40,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,sinks=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=q8_0,permute=[0,1,2,3]): FAIL
+
+    //test_cases.emplace_back(new test_flash_attn_ext(
+    //    40, 40, 4, {1, 1}, 512, 1, 1, 1, 0.0, 0.0, GGML_PREC_F32, GGML_TYPE_Q8_0, {0, 1, 2, 3}));
+
 
     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {   10, 5, 4, 3}));
     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {30000, 1, 1, 1}));
@@ -6943,7 +7017,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     for (int kv : { 4096, 8192, 16384, }) {
         for (int hs : { 64, 128, }) {
             for (int nr : { 1, 4, }) {
-                test_cases.emplace_back(new test_flash_attn_ext(hs, hs, 8, {nr, 1}, kv, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16));
+                //test_cases.emplace_back(new test_flash_attn_ext(hs, hs, 8, {nr, 1}, kv, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16));
             }
         }
     }

@@ -1,5 +1,11 @@
+#ifndef GGML_SYCL_FATTN_VEC_HPP
+#define GGML_SYCL_FATTN_VEC_HPP
+
 #include <sycl/sycl.hpp>
 #include <sycl/ext/oneapi/work_group_static.hpp>
+#include <iostream>
+#include <iomanip>
+
 #include "dpct/helper.hpp"
 #include "common.hpp"
 #include "ggml.h"
@@ -68,7 +74,41 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
                         const int32_t nb32,
                         const int64_t nb33,
                         const sycl::nd_item<3>& item_ct1,
+                        const sycl::stream & out,
                         uint8_t* unused_lsm) {
+ int blockId = item_ct1.get_group(2) + item_ct1.get_group(1) * item_ct1.get_group_range(2) + item_ct1.get_group(0) * item_ct1.get_group_range(2) * item_ct1.get_group_range(1);
+ int threadsPerBlock = item_ct1.get_local_range(2) * item_ct1.get_local_range(1) * item_ct1.get_local_range(0);
+ int threadInBlockId = item_ct1.get_local_id(2) + item_ct1.get_local_id(1) * item_ct1.get_local_range(2) + item_ct1.get_local_id(0) * item_ct1.get_local_range(2) * item_ct1.get_local_range(1);
+ int id = blockId * threadsPerBlock + threadInBlockId;
+
+ if(id==0) {
+        sycl::ext::oneapi::experimental::printf("zjy entry flash_attn_ext_vec ncols=%d\n", ncols);
+        sycl::ext::oneapi::experimental::printf("id=%d D=%d ncols=%d\n", id, D, ncols);
+ }
+//     if(id==0) {
+//         sycl::ext::oneapi::experimental::printf("zjy id=%d blockIdx.x=%d blockIdx.y=%d blockIdx.z=%d threadIdx.x=%d threadIdx.y=%d threadIdx.z=%d blockDim.x=%d blockDim.y=%d blockDim.z=%d \n",
+//     id, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y, threadIdx.z, blockDim.x, blockDim.y, blockDim.z);
+// }
+//   if (id == 0) {
+//     sycl::ext::oneapi::experimental::printf(
+//         "zjy id=%d blockIdx.x=%d blockIdx.y=%d blockIdx.z=%d threadIdx.x=%d "
+//         "threadIdx.y=%d threadIdx.z=%d blockDim.x=%d blockDim.y=%d "
+//         "blockDim.z=%d \n",
+//         id,
+//         item_ct1.get_group(2),
+//         item_ct1.get_group(1),
+//         item_ct1.get_group(0),
+//         item_ct1.get_local_id(2),
+//         item_ct1.get_local_id(1),
+//         item_ct1.get_local_id(0),
+//         item_ct1.get_local_range(2),
+//         item_ct1.get_local_range(1),
+//         item_ct1.get_local_range(0));
+//     sycl::ext::oneapi::experimental::printf(
+//         "zjy id=%d mask=%p mask[0]=%d %d %d %d\n",
+//         id, mask,
+//         mask[0],mask[1],mask[2],mask[3]);
+//   }
 // sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec\n");
 #ifdef FLASH_ATTN_AVAILABLE
 
@@ -84,7 +124,6 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
                   nb21, nb22, nb23,
                   ne31, ne32, ne33,
                   nb31, nb32, nb33);
-        sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 1\n");
         return;
     }
 
@@ -137,39 +176,38 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
 
     // __shared__ float KQ_max_shared[ncols][WARP_32_SIZE];
     // __shared__ float KQ_sum_shared[ncols][WARP_32_SIZE];
-    constexpr size_t lsm_size1 = ncols * WARP_32_SIZE*sizeof(float);
-    constexpr size_t lsm_size2 = ncols * WARP_32_SIZE*sizeof(float);
 
+    constexpr size_t lsm_size1 = ncols * WARP_32_SIZE;
+    constexpr size_t lsm_size2 = ncols * WARP_32_SIZE;
 #ifdef FAST_FP16_AVAILABLE
     sycl::half2 VKQ[ncols][(D / 2) / nthreads_V] = { { { 0.0f, 0.0f } } };
     // __shared__ half   KQ[ne_KQ > ne_combine ? ne_KQ : ne_combine];
-    constexpr size_t lsm_size3 = (ne_KQ > ne_combine ? ne_KQ : ne_combine)*sizeof(sycl::half);
-    constexpr size_t local_share_mem_size = lsm_size1 + lsm_size2 + lsm_size3;
+    constexpr size_t lsm_size3 = (ne_KQ > ne_combine ? ne_KQ : ne_combine);
+    constexpr size_t local_share_mem_size = (lsm_size1 + lsm_size2)*sizeof(float) + lsm_size3*sizeof(sycl::half);
 
     syclex::work_group_static<char[local_share_mem_size]> lsm;
     // char *lsm = static_cast<char *>(syclex::get_work_group_scratch_memory());
     // sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 16 lsm=%p\n", &lsm);
 
     float (*KQ_max_shared)[WARP_32_SIZE] = (float (*)[WARP_32_SIZE])&lsm;
-    float (*KQ_sum_shared)[WARP_32_SIZE] = (float (*)[WARP_32_SIZE])((char*)&lsm+lsm_size1);
-    sycl::half* KQ = (sycl::half*)((char*)&lsm + lsm_size1 + lsm_size2);
+    float (*KQ_sum_shared)[WARP_32_SIZE] = (float (*)[WARP_32_SIZE])(KQ_max_shared+lsm_size1);
+    sycl::half* KQ = (sycl::half*)(KQ_sum_shared + lsm_size2);
 
 #else
     sycl::float2 VKQ[ncols][(D/2)/nthreads_V] = {{{0.0f, 0.0f}}};
-    //   if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec x=%f y=%f x=%f y=%f\n",
-    //    VKQ[0][0].x(), VKQ[0][0].y(),VKQ[0][1].x(), VKQ[0][1].y());
 
     // __shared__ float  KQ[ne_KQ > ne_combine ? ne_KQ : ne_combine];
-    constexpr size_t lsm_size3 = (ne_KQ > ne_combine ? ne_KQ : ne_combine)*sizeof(float);
-    constexpr size_t local_share_mem_size = lsm_size1 + lsm_size2 + lsm_size3;
+    constexpr size_t lsm_size3 = (ne_KQ > ne_combine ? ne_KQ : ne_combine);
+    constexpr size_t local_share_mem_size = (lsm_size1 + lsm_size2 + lsm_size3)*sizeof(float);
+
+         // char *lsm = static_cast<char *>(syclex::get_work_group_scratch_memory());
+
     syclex::work_group_static<char[local_share_mem_size]> lsm;
-    // char *lsm = static_cast<char *>(syclex::get_work_group_scratch_memory());
+    float *KQ_max_shared = (float *)&lsm;
+    float *KQ_sum_shared = KQ_max_shared+lsm_size1;
+    float* KQ = KQ_sum_shared + lsm_size2;
 
-    float (*KQ_max_shared)[WARP_32_SIZE] = (float (*)[WARP_32_SIZE])&lsm;
-    float (*KQ_sum_shared)[WARP_32_SIZE] = (float (*)[WARP_32_SIZE])((char*)&lsm+lsm_size1);
-    float* KQ = (float*)((char*)&lsm + lsm_size1 + lsm_size2);
-
-    // if (item_ct1.get_global_id(2) == 0)
+    // if (id== 0)
     //     sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 32 lsm=%p KQ_max_shared=%p KQ_sum_shared=%p KQ=%p lsm_size1=%d, lsm_size2=%d, lsm_size3=%d local_share_mem_size=%d\n",
     //         &lsm, KQ_max_shared, KQ_sum_shared, KQ, lsm_size1, lsm_size2, lsm_size3, local_share_mem_size);
 
@@ -187,6 +225,9 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
         KQ_sum[j] = 0.0f;
     }
 
+    // if (id == 0)sycl::ext::oneapi::experimental::printf("zjy 62 KQ_max[j]=%f FLT_MAX=%f ncols=%d nthreads_KQ=%d\n",
+    //         KQ_max[0], FLT_MAX, ncols, nthreads_KQ);
+
     // Convert Q to float2 (f16 K) or q8_1 (quantized K) and store in registers:
 #ifdef FAST_FP16_AVAILABLE
     sycl::half2 Q_reg[ncols][(D / 2) / nthreads_KQ];  // Will be initialized completely.
@@ -194,15 +235,23 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
     sycl::float2 Q_reg[ncols][(D/2)/nthreads_KQ] = {{{0.0f, 0.0f}}}; // May be only partially initialized.
 #endif // FAST_FP16_AVAILABLE
 
-// if (item_ct1.get_global_id(2) == 0) sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 3\n");
+    // if (id == 0) {
+    //   out << "Z PTR0 " << static_cast<const void*>(&KQ[0]) << " "
+    //       << static_cast<const void*>(&KQ[1]) << sycl::endl;
+
+    //   for (int zj = 0; zj < 34; ++zj) {
+    //     { out << KQ[zj] << " "; }
+    //   }
+    //   out << sycl::endl;
+    // }
 
     int    Q_i32[ncols][1 > D/(sizeof(int)*nthreads_KQ) ? 1 : D/(sizeof(int)*nthreads_KQ)];
     sycl::float2 Q_ds[ncols][1 > D / (sizeof(int) * nthreads_KQ) ? 1 : D / (sizeof(int) * nthreads_KQ)];
     if constexpr (Q_q8_1) {
+        // if (id == 0)  out << "Z Q_q8_1\n";
 #pragma unroll
         for (int j0 = 0; j0 < ncols; j0 += nwarps) {
             const int j = j0 + item_ct1.get_local_id(1);
-
             if (j0 + nwarps > ncols && j >= ncols) {
                 break;
             }
@@ -211,6 +260,15 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
             int    * tmp_q_i32 = (int    *) &KQ[j*D];
             sycl::float2 * tmp_q_ds  = (sycl::float2 *) (tmp_q_i32 + D / sizeof(int));
 
+            // if (id == 0) {
+            //   out << "Z PTR01 " << static_cast<const void*>(tmp_q_i32) << " "
+            //       << static_cast<const void*>(tmp_q_ds) << sycl::endl;
+
+            //   for (int zj = 0; zj < 34; ++zj) {
+            //     { out << KQ[zj] << " "; }
+            //   }
+            //   out << sycl::endl;
+            // }
             // sycl::ext::oneapi::experimental::printf("zjy tmp_q_i32=%p tmp_q_ds=%p D / sizeof(int)=%d\n",
             // tmp_q_i32, tmp_q_ds, D / sizeof(int));
 
@@ -225,7 +283,6 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
                     }
                 }
                 if (item_ct1.get_local_id(2) < D/QK8_1) {
-                    // zjy
                     tmp_q_ds[item_ct1.get_local_id(2)] = sycl::float2(0.0f, 0.0f);
                 }
             } else {
@@ -233,16 +290,39 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
                 constexpr int nthreads_quantize = D/sizeof(int) < WARP_32_SIZE ? D/sizeof(int) : WARP_32_SIZE;
 #pragma unroll
                 for (int i0 = 0; i0 < int(D/sizeof(int)); i0 += nthreads_quantize) {
-                    // zjy
                     quantize_q8_1_to_shared<sycl::float2, nthreads_quantize>
                         (Q_f + i0*sizeof(int), scale, tmp_q_i32 + i0, tmp_q_ds + i0/QI8_1);
+                    // if (id == 0) {
+                    //   out << "Z4 "<<i0 <<" "<< tmp_q_i32[i0] << " "
+                    //   << i0/QI8_1 << " "
+                    //   << tmp_q_ds[i0/QI8_1].x()<< sycl::endl;
+                    // }
                 }
+
             }
         }
 
+        // if (id == 0) {
+        //   out << "PTR10 " << static_cast<const void*>(&KQ[0]) << " "
+        //       << static_cast<const void*>(&KQ[1]) << sycl::endl;
+        //   for (int zj = 0; zj < 33; ++zj) {
+        //     out << KQ[zj] << " ";
+        //   }
+        //   out << sycl::endl;
+        // }
+
         item_ct1.barrier(sycl::access::fence_space::local_space);
 
-        // if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 4\n");
+        // if (id == 0){
+        //   sycl::ext::oneapi::experimental::printf(
+        //       "zjy 63 KQ_max[j]=%f lsm_size3=%d KQ=\n",
+        //       KQ_max[0], lsm_size3);
+        //   }
+        //   return;
+
+          // if (item_ct1.get_global_id(2) ==
+          // 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec
+          // 4\n");
 #pragma unroll
         for (int j = 0; j < ncols; ++j) {
             int    * tmp_q_i32 = (int    *) &KQ[j*D];
@@ -255,10 +335,18 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
 
                 Q_i32[j][i0/nthreads_KQ] = tmp_q_i32[i];
                 Q_ds[j][i0/nthreads_KQ]  = tmp_q_ds[i/QI8_1];
+
+                // if (id == 0) {
+                //   out << "zjy 64 i=" << i << " " << j << " " << i0 / nthreads_KQ
+                //       << " " << Q_i32[j][i0 / nthreads_KQ] << " "
+                //       << Q_ds[j][i0 / nthreads_KQ].x() << " "
+                //       << Q_ds[j][i0 / nthreads_KQ].y() << sycl::endl;
+                // }
             }
         }
 
         item_ct1.barrier(sycl::access::fence_space::local_space);
+
         // if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 5\n");
     } else {
 #ifdef FAST_FP16_AVAILABLE
@@ -316,19 +404,29 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
     K += item_ct1.get_group(1) * nthreads * nb11;
     V += item_ct1.get_group(1) * nthreads * nb21;
     maskh += item_ct1.get_group(1) * nthreads;
+
+
+
     for (int k_VKQ_0 = item_ct1.get_group(1) * nthreads; k_VKQ_0 < k_VKQ_max;
          k_VKQ_0 += item_ct1.get_group_range(1) * nthreads,
              // Increment pointers after each loop:
          K += item_ct1.get_group_range(1) * nthreads * nb11, V += item_ct1.get_group_range(1) * nthreads * nb21,
              maskh += item_ct1.get_group_range(1) * nthreads) {
         // Calculate KQ tile and keep track of new maximum KQ values:
-        float KQ_reg[ncols]; // KQ in registers.
+        float KQ_reg[ncols]={}; // KQ in registers.
+        float KQ_max_new[ncols]={};
 
-        float KQ_max_new[ncols];
+
 #pragma unroll
         for (int j = 0; j < ncols; ++j) {
             KQ_max_new[j] = KQ_max[j];
+            // if (id == 0) {
+            //     out << "Z 65 KQ_max_new0[j]  "<< j << " "<< KQ_max_new[j]<<
+            //     " KQ_reg[j] "<< KQ_reg[j] <<"\n";
+            // }
         }
+        // if (id ==0 ) out << "loop sum "<<nthreads_KQ <<" "<<ncols <<
+        // " sub group local range "<< item_ct1.get_sub_group().get_local_range()[0]<< sycl::endl;
 
 #pragma unroll
         for (int i_KQ_0 = 0; i_KQ_0 < nthreads_KQ; ++i_KQ_0) {
@@ -338,16 +436,29 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
 #pragma unroll
             for (int j = 0; j < ncols; ++j) {
                 float sum = vec_dot_KQ(K + i_KQ*nb11, Q_reg[j], Q_i32[j], Q_ds[j]);
-                sum = warp_reduce_sum<nthreads_KQ>(sum);
+                // if (id ==0 ) out << "sum0 "<<i_KQ_0 <<" "<<j <<" " << sum<<"\n";
+                // if (id == 0)sycl::ext::oneapi::experimental::printf("move_k3=%d\n", i_KQ*nb11);
 
+                // if(id==0) sycl::ext::oneapi::experimental::printf("Q4 id=%d %f %d %f %d %f\n", id,
+                //     sum, i_KQ*nb11, Q_reg[j][0].x(), Q_i32[j][0], Q_ds[j][0].x());
+
+
+                sum = warp_reduce_sum<nthreads_KQ>(sum);
+                // sum = warp_reduce_sum(sum, item_ct1);
+                // if (id == 0)  out << "sum1 "<< sum<< " nthreads_KQ "<<nthreads_KQ<<sycl::endl;
                 if (use_logit_softcap) {
                     sum = logit_softcap * sycl::tanh(sum);
                 }
-
+                // if (id == 0)  out << "sum2 "<< sum<<sycl::endl;
                 if (mask) {
                     sum += slope * sycl::vec<sycl::half, 1>(maskh[j * ne11 + i_KQ])
                                        .convert<float, sycl::rounding_mode::automatic>()[0];
                 }
+                // if (id == 0)  out << "sum3 "<< sum<< sycl::endl;
+                // if (id == 0) {
+                //     out << "KQ_max_new1[j]  "<< j << " "<< KQ_max_new[j]<<
+                //     " sum "<< sum << sycl::endl;
+                // }
 
                 KQ_max_new[j] = sycl::fmax((float) KQ_max_new[j], sum);
 
@@ -355,24 +466,68 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
                     i_KQ_0) {
                     KQ_reg[j] = sum;
                 }
+                // if (id == 0) {
+                //     sycl::ext::oneapi::experimental::printf("KQ_max_new[j] %d %f KQ_reg[j]=%f\n",j, KQ_max_new[j], KQ_reg[j]);
+                //     }
+                // return;
             }
+
         }
+        // return;
+        // if (id == 0) {
+        //   out << "KQ[] 01  " << sycl::endl;
+        //   for (int zj = 0; zj < 34; ++zj) {
+        //     { out << KQ[zj] << " "; }
+        //   }
+        //   out << sycl::endl;
+        // }
+
         // if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 7\n");
 #pragma unroll
         for (int j = 0; j < ncols; ++j) {
+            // if (id == 0) {
+            //     out << "KQ_max_new0[j]  ";
+            //     out << j << " "<< KQ_max_new[j];
+
+            //     out << sycl::endl;
+            // }
+
 #pragma unroll
-            for (int offset = nthreads_KQ; offset < WARP_32_SIZE; offset <<= 1) {
-                KQ_max_new[j] =
-                    sycl::fmax((float) KQ_max_new[j],
-                               (float) dpct::permute_sub_group_by_xor(
-                                   sycl::ext::oneapi::this_work_item::get_sub_group(), KQ_max_new[j], offset));
+            for (int offset = nthreads_KQ; offset < WARP_32_SIZE;
+                 offset <<= 1) {
+               KQ_max_new[j] = sycl::fmax(
+                  (float)KQ_max_new[j],
+                  (float)dpct::permute_sub_group_by_xor(
+                      sycl::ext::oneapi::this_work_item::get_sub_group(),
+                      KQ_max_new[j],
+                      offset,
+                      WARP_32_SIZE));
             }
+
             const float KQ_max_scale = sycl::native::exp((float) (KQ_max[j] - KQ_max_new[j]));
+            // if (id == 0) {
+            //     out << "Z 66 KQ_max_new[j] "<<j << " " << KQ_max_new[j] << " KQ_max[j] " << KQ_max[j]<<sycl::endl;
+            // }
+
             KQ_max[j] = KQ_max_new[j];
+            // if (id == 0) {
+            //     out << "KQ_max[j]  "<< j << " "<< KQ_max[j]<< "\n";
+            //     out << "KQ_reg[j]  " << j << " "<< KQ_reg[j]<< "\n";
+            // }
 
             KQ_reg[j]            = sycl::native::exp((float) (KQ_reg[j] - KQ_max[j]));
             KQ_sum[j] = KQ_sum[j]*KQ_max_scale + KQ_reg[j];
             KQ[j*nthreads + tid] = KQ_reg[j];
+            // if (id == 0) {
+            //     out << "KQ[j*nthreads + tid]  ";
+            //     out << j*nthreads + tid<< " "<< KQ[j*nthreads + tid] << " ";
+            //     out << "KQ_max[j]  ";
+            //     out << j << " "<< KQ_max[j];
+            //     out << " KQ_reg[j]  " << j << " "<< KQ_reg[j]<< "\n";
+
+            //     out << sycl::endl;
+            // }
+
 
 #ifdef FAST_FP16_AVAILABLE
             const sycl::half2 KQ_max_scale_h2 = sycl::half2(KQ_max_scale, KQ_max_scale);
@@ -389,9 +544,18 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
 #endif // FAST_FP16_AVAILABLE
         }
 
+        // if (id == 0) {
+        //   out << "KQ[]  "<< sycl::setprecision(6) << sycl::endl;
+        //   for (int zj = 0; zj < 34; ++zj) {
+        //     { out << KQ[zj] << " "; }
+        //   }
+        //   out << sycl::endl;
+        // }
+
 #ifndef GGML_USE_HIP
         sycl::group_barrier(sycl::ext::oneapi::this_work_item::get_sub_group());
 #endif // GGML_USE_HIP
+
 // if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 8\n");
 #pragma unroll
         for (int k0 = 0; k0 < WARP_32_SIZE; k0 += V_cols_per_iter) {
@@ -420,10 +584,22 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
                 }
             }
 #else
+            // if (id == 0) {
+            //   out << "KQ[]  "<<sycl::endl;
+            //   uint8_t * aa = (uint8_t *)KQ;
+            //   for (int zj = 0; zj < 34*4; ++zj) {
+            //     { out << aa[zj] << " "; }
+            //   }
+            //   out << sycl::endl;
+            // }
+
             float KQ_k[ncols];
 #pragma unroll
             for (int j = 0; j < ncols; ++j) {
                 KQ_k[j] = KQ[j*nthreads + k];
+                // if (id == 0) {
+                //   out <<"zjy 9 "<<  " "<< int(j*nthreads + k) << sycl::endl;
+                // }
             }
 #pragma unroll
             for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
@@ -436,9 +612,16 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
                     for (int j = 0; j < ncols; ++j) {
                         VKQ[j][i_VKQ_0/nthreads_V + i_VKQ_1].x() += tmp[i_VKQ_1].x()*KQ_k[j];
                         VKQ[j][i_VKQ_0/nthreads_V + i_VKQ_1].y() += tmp[i_VKQ_1].y()*KQ_k[j];
-                        // if (item_ct1.get_global_id(2) == 0){
-                        //   sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 8 j=%d i_VKQ_0/nthreads_V + i_VKQ_1=%d x=%f\n",
-                        //     j, i_VKQ_0/nthreads_V + i_VKQ_1, VKQ[j][i_VKQ_0/nthreads_V + i_VKQ_1].x());
+                        // if (id ==0) {
+                        //     out << "VKQ[j]  x="<< sycl::setprecision(6)<<
+                        //     VKQ[j][i_VKQ_0/nthreads_V + i_VKQ_1].x() << " y="<<
+                        //     VKQ[j][i_VKQ_0/nthreads_V + i_VKQ_1].y() << sycl::endl;
+                        // }
+
+                        // if (id == 0){
+                        //   out << VKQ[j][i_VKQ_0/nthreads_V + i_VKQ_1].x() << " "<<  tmp[i_VKQ_1].x() << " "
+                        //   << KQ_k[j] << sycl::endl;
+
                         //   }
                     }
                 }
@@ -447,11 +630,33 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
         }
     }
 
+    // if (id == 0) sycl::ext::oneapi::experimental::printf(
+    //         "ncols=%d\n",ncols);
 
+    // for (int k = 0; k < ncols; k++) {
+        // if (id == 0) sycl::ext::oneapi::experimental::printf(
+        //     "ncols=%d\n",ncols);
+    //   if (id == 0 && ncols<2) {
+
+    //     sycl::ext::oneapi::experimental::printf(
+    //         "zjy 5 j=%d i%d x=%f y=%f x=%f y=%f\n",
+    //         k,
+    //         0,
+    //         VKQ[k][0].x(),
+    //         VKQ[k][0].y(),
+    //         VKQ[k][1].x(),
+    //         VKQ[k][1].y());
+    //   }
+    // }
+    // return;
 // if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 9\n");
 
     if (sinks && item_ct1.get_group(1) == 0) {
+        // if (id == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 9, sink=%f\n", sink);
+
         const float sink = ((const float *) sinks)[head];
+        // if (id == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 9, sink=%f KQ_max[j]=%f\n",
+        //     sink, KQ_max[0]);
 
 #pragma unroll
         for (int j0 = 0; j0 < ncols; j0 += nwarps) {
@@ -461,14 +666,21 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
                 break;
             }
             //if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec j=%d\n",j);
-
+            // if (id == 0 && j0==0) {
+            //     // sycl::ext::oneapi::experimental::printf("zjy 61 KQ_max[%d]=%f KQ_sum[%d]=%f sink=%f\n",
+            //     //     j, KQ_max[j], j, KQ_sum[j],sink);
+            //     return;
+            // }
             const float kqmax_new_j  = sycl::fmax(sink, (float) KQ_max[j]);
             const float KQ_max_scale = sycl::native::exp((float) (KQ_max[j] - kqmax_new_j));
             KQ_max[j] = kqmax_new_j;
 
             KQ_sum[j] = KQ_sum[j] * KQ_max_scale +
                         (item_ct1.get_local_id(2) == 0 ? sycl::native::exp((float) (sink - KQ_max[j])) : 0.0f);
-
+            // if (id == 0) {
+            //     sycl::ext::oneapi::experimental::printf("zjy 61 KQ_max[%d]=%f KQ_sum[%d]=%f\n",
+            //         j, KQ_max[j], j, KQ_sum[j]);
+            // }
 #ifdef FAST_FP16_AVAILABLE
             const sycl::half2 KQ_max_scale_h2 = sycl::half2(KQ_max_scale, KQ_max_scale);
 #pragma unroll
@@ -479,53 +691,54 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
 // if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec fp32\n");
 #pragma unroll
             for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V) {
-                const int vv = int(i_VKQ_0/nthreads_V);
-                // if (item_ct1.get_global_id(2) == 0)
-                {
-                // sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec j=%d i_VKQ_0/nthreads_V=%d vv=%d\n",j,
-                // i_VKQ_0/nthreads_V, vv);
-                // sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec j=%d i_VKQ_0/nthreads_V=%d x=%f y=%f\n",j,
-                // i_VKQ_0/nthreads_V, VKQ[0][1].x(), VKQ[0][1].y());
-                }
-                // VKQ[j][i_VKQ_0/nthreads_V].x() *= KQ_max_scale;
-                // VKQ[j][i_VKQ_0/nthreads_V].y() *= KQ_max_scale;
-                // float x = VKQ[j][vv].x()* KQ_max_scale;
-                // VKQ[j][i_VKQ_0/nthreads_V].x() *= KQ_max_scale;
-                // VKQ[j][i_VKQ_0/nthreads_V].y() *= KQ_max_scale;
-                // if ((vv==0 || vv==1) && j==0)
-                {
-                    // sycl::ext::oneapi::experimental::printf("zjy ok vv=%d j=%d\n", vv, j);
-                    VKQ[j][vv].x() *= KQ_max_scale;
-                    VKQ[j][vv].y() *= KQ_max_scale;
-                }
-                // else {
-                //     sycl::ext::oneapi::experimental::printf("zjy error vv=%d j=%d\n", vv, j);
+                // const int vv = int(i_VKQ_0/nthreads_V);
+                VKQ[j][i_VKQ_0/nthreads_V].x() *= KQ_max_scale;
+                VKQ[j][i_VKQ_0/nthreads_V].y() *= KQ_max_scale;
+                // if (id == 31) {
+                //   out << "VKQ[j]  x=" << sycl::setprecision(6) << VKQ[j][i_VKQ_0/nthreads_V].x()
+                //       << " y=" << VKQ[j][i_VKQ_0/nthreads_V].y() << sycl::endl;
                 // }
-                // VKQ[j][vv].x() *= KQ_max_scale;
-                // VKQ[j][vv].y() *= KQ_max_scale;;
             }
 #endif // FAST_FP16_AVAILABLE
         }
     }
 
 // if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 10\n");
+    // if(id==31){
+    //     out << "KQ_max_shared 0:"<<id<<' ';
+    //     for(int jj=0; jj<ncols;jj++){
+    //         for(int ii=0; ii<ncols*WARP_SIZE;ii++){
+    //             out << KQ_max_shared[jj*WARP_32_SIZE+ii] <<" ";
+    //         }
+    //     }
+    //     out << sycl::endl;
+    // }
 
 #pragma unroll
     for (int j = 0; j < ncols; ++j) {
         if (item_ct1.get_local_id(1) == 0) {
-            KQ_max_shared[j][item_ct1.get_local_id(2)] = -FLT_MAX / 2.0f;
-            KQ_sum_shared[j][item_ct1.get_local_id(2)] = 0.0f;
+            KQ_max_shared[j*WARP_32_SIZE+item_ct1.get_local_id(2)] = -FLT_MAX / 2.0f;
+            KQ_sum_shared[j*WARP_32_SIZE+item_ct1.get_local_id(2)] = 0.0f;
         }
     }
 
     item_ct1.barrier(sycl::access::fence_space::local_space);
 // if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 11\n");
 
+    // if(id==31){
+    //     out << "KQ_max_shared 1:"<<id<<' ';
+    //     for(int jj=0; jj<ncols;jj++){
+    //         for(int ii=0; ii<ncols*WARP_SIZE;ii++){
+    //             out << KQ_max_shared[jj*WARP_32_SIZE+ii] <<" ";
+    //         }
+    //     }
+    //     out << sycl::endl;
+    // }
 
 #pragma unroll
     for (int j = 0; j < ncols; ++j) {
         if (item_ct1.get_local_id(2) == 0) {
-            KQ_max_shared[j][item_ct1.get_local_id(1)] = KQ_max[j];
+            KQ_max_shared[j*WARP_32_SIZE+item_ct1.get_local_id(1)] = KQ_max[j];
         }
     }
 
@@ -534,17 +747,46 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
 
     item_ct1.barrier(sycl::access::fence_space::local_space);
 
+    // if(id==31){
+    //     out << "KQ_max_shared:"<<id<<' ';
+    //     for(int jj=0; jj<ncols;jj++){
+    //         for(int ii=0; ii<ncols*WARP_SIZE;ii++){
+    //             out << KQ_max_shared[jj*WARP_32_SIZE+ii] <<" ";
+    //         }
+    //     }
+    //     out << sycl::endl;
+    // }
 #pragma unroll
     for (int j_VKQ = 0; j_VKQ < ncols; ++j_VKQ) {
         if (ncols > 1 && ic0 + j_VKQ >= ne01) {
             break;
         }
 
-        float kqmax_new         = KQ_max_shared[j_VKQ][item_ct1.get_local_id(2)];
-        kqmax_new = warp_reduce_max(kqmax_new);
+        float kqmax_new         = KQ_max_shared[j_VKQ*WARP_32_SIZE+item_ct1.get_local_id(2)];
+        // if (id == 31) {
+        //   out << " kqmax_new0="<<kqmax_new
+        //   << " KQ_max_shared "
+        //   << j_VKQ << " " << item_ct1.get_local_id(2)
+        //     << sycl::endl;
+        // }
+        kqmax_new = warp_reduce_max<WARP_32_SIZE>(kqmax_new);
         const float kqmax_scale = sycl::native::exp((float) (KQ_max[j_VKQ] - kqmax_new));
-        KQ_max[j_VKQ] = kqmax_new;
+        // if (id == 31) {
+        //   out << "KQ_max[j_VKQ] =" << sycl::setprecision(6) << KQ_max[j_VKQ]
+        //     << " kqmax_new="<<kqmax_new
+        //     << " kqmax_scale="<<kqmax_scale
+        //     << sycl::endl;
+        // }
 
+        KQ_max[j_VKQ] = kqmax_new;
+        // if (id == 0) {
+        //   out << "KQ_max[j_VKQ] =" << sycl::setprecision(6) << KQ_max[j_VKQ]
+        //       << sycl::endl;
+        // }
+        //  if (id == 31) {
+        //     out << " kqmax_scale3="<<kqmax_scale
+        //     << sycl::endl;
+        // }
 #ifdef FAST_FP16_AVAILABLE
         sycl::half2 * VKQ_tmp = (sycl::half2 *) KQ + item_ct1.get_local_id(1) * (V_cols_per_iter * D / 2) +
                                 (nthreads_V == WARP_32_SIZE ? 0 : item_ct1.get_local_id(2) / nthreads_V) * (D / 2);
@@ -564,14 +806,34 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
                                                                        &VKQ[j_VKQ][i_VKQ_0 / nthreads_V]);
         }
 #else
-
+        //  if (id == 31) {
+        //     out << " kqmax_scale2="<<kqmax_scale
+        //     << sycl::endl;
+        // }
         sycl::float2 * VKQ_tmp = (sycl::float2 *) KQ + item_ct1.get_local_id(1)*(V_cols_per_iter*D/2)
             + (nthreads_V == WARP_32_SIZE ? 0 : item_ct1.get_local_id(2) / nthreads_V)*(D/2);
-
+        // if (id == 31) {
+        //     out << " kqmax_scale1="<<kqmax_scale
+        //     << sycl::endl;
+        // }
 #pragma unroll
         for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V) {
+            // if (id == 31) {
+            //   out << "VKQ[j_VKQ][i_VKQ_0/nthreads_V]0  x=" << sycl::setprecision(6)
+            //       << VKQ[j_VKQ][i_VKQ_0/nthreads_V].x()
+            //       << " y=" << VKQ[j_VKQ][i_VKQ_0/nthreads_V].y()
+            //       << " kqmax_scale="<<kqmax_scale
+            //       << sycl::endl;
+            // }
+
             VKQ[j_VKQ][i_VKQ_0/nthreads_V].x() *= kqmax_scale;
             VKQ[j_VKQ][i_VKQ_0/nthreads_V].y() *= kqmax_scale;
+            // if (id == 31) {
+            //   out << "VKQ[j_VKQ][i_VKQ_0/nthreads_V]  x=" << sycl::setprecision(6)
+            //       << VKQ[j_VKQ][i_VKQ_0/nthreads_V].x()
+            //       << " y=" << VKQ[j_VKQ][i_VKQ_0/nthreads_V].y()
+            //       << sycl::endl;
+            // }
         }
 #pragma unroll
         for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
@@ -583,9 +845,15 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
 #endif // FAST_FP16_AVAILABLE
 
         KQ_sum[j_VKQ] *= kqmax_scale;
-        KQ_sum[j_VKQ] = warp_reduce_sum(KQ_sum[j_VKQ]);
+        KQ_sum[j_VKQ] = warp_reduce_sum<WARP_32_SIZE>(KQ_sum[j_VKQ]);
+
+        // if (id == 0) {
+        //   out << "KQ_sum[j_VKQ] =" << sycl::setprecision(6) << KQ_sum[j_VKQ]
+        //       << sycl::endl;
+        // }
+
         if (item_ct1.get_local_id(2) == 0) {
-            KQ_sum_shared[j_VKQ][item_ct1.get_local_id(1)] = KQ_sum[j_VKQ];
+            KQ_sum_shared[j_VKQ*WARP_32_SIZE+item_ct1.get_local_id(1)] = KQ_sum[j_VKQ];
         }
 
         /*
@@ -598,8 +866,8 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
 // if (item_ct1.get_global_id(2) == 0)sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 12\n");
 
         if (nthreads <= D || tid < D) {
-            KQ_sum[j_VKQ] = KQ_sum_shared[j_VKQ][item_ct1.get_local_id(2)];
-            KQ_sum[j_VKQ] = warp_reduce_sum(KQ_sum[j_VKQ]);
+            KQ_sum[j_VKQ] = KQ_sum_shared[j_VKQ*WARP_32_SIZE+item_ct1.get_local_id(2)];
+            KQ_sum[j_VKQ] = warp_reduce_sum<WARP_32_SIZE>(KQ_sum[j_VKQ]);
 
 #pragma unroll
             for (int i0 = 0; i0 < D; i0 += nthreads) {
@@ -637,7 +905,7 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
         dst_meta[((sequence * ne01 + ic0 + tid) * ne02 + head) * item_ct1.get_group_range(1) + item_ct1.get_group(1)] =
             make_float2(KQ_max[tid], KQ_sum[tid]);
     }
-    // sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec 2\n");
+    // if (id == 0) sycl::ext::oneapi::experimental::printf("zjy flash_attn_ext_vec done\n");
 
 #else
     GGML_UNUSED_VARS(Q, K, V, mask, sinks, KV_max, dst, dst_meta, scale,
@@ -659,6 +927,7 @@ static void flash_attn_ext_vec(const char* __restrict__ Q,
 // template <int D, int cols_per_block, ggml_type type_K, ggml_type type_V, bool use_logit_softcap>
 template <int D, int cols_per_block, int type_K, int type_V, bool use_logit_softcap>
 void ggml_sycl_flash_attn_ext_vec_case_impl(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
+    printf("zjy ggml_sycl_flash_attn_ext_vec_case_impl\n");
     const int cc = ggml_sycl_info().devices[ggml_sycl_get_device()].cc;
 
     const int nthreads = ggml_sycl_fattn_vec_get_nthreads_host(cc);
@@ -667,21 +936,26 @@ void ggml_sycl_flash_attn_ext_vec_case_impl(ggml_backend_sycl_context & ctx, ggm
     constexpr bool need_f16_K = false;
     constexpr bool need_f16_V = false;
     constexpr size_t nbytes_shared = 0;
-    printf("zjy ggml_sycl_flash_attn_ext_vec_case_impl cc=%d, nthreads=%d nwarps=%d\n", cc, nthreads, nwarps);
+    printf("zjy ggml_sycl_flash_attn_ext_vec_case_impl cc=%d, nthreads=%d nwarps=%d D=%d\n", cc, nthreads, nwarps, D);
     #ifdef FAST_FP16_AVAILABLE
-      printf("zjy fp16\n");
+    //   printf("zjy fp16\n");
     #else
-      printf("zjy fp32\n");
+    //   printf("zjy fp32\n");
     #endif
+
+    // log_ggml_var_device("dst", (float*)dst->src[0]->data, 100, (dpct::queue_ptr)ctx.stream(), true);
+
     launch_fattn<D, cols_per_block, 1,
                  flash_attn_ext_vec<D, cols_per_block, type_K, type_V,
                                     use_logit_softcap>>(
         ctx, dst, nwarps, nbytes_shared, D, need_f16_K, need_f16_V, false);
+    printf("zjy ggml_sycl_flash_attn_ext_vec_case_impl done\n");
 }
 
 // template <int D, ggml_type type_K, ggml_type type_V>
 template <int D, int type_K, int type_V>
 void ggml_sycl_flash_attn_ext_vec_case(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
+    printf("zjy ggml_cuda_flash_attn_ext_vec_case\n");
     const ggml_tensor * KQV = dst;
     const ggml_tensor * Q   = dst->src[0];
     const ggml_tensor * K   = dst->src[1];
@@ -697,9 +971,11 @@ void ggml_sycl_flash_attn_ext_vec_case(ggml_backend_sycl_context & ctx, ggml_ten
         constexpr int cols_per_block = 1;
         if (logit_softcap == 0.0f) {
             constexpr bool use_logit_softcap = false;
+            printf("zjy ggml_cuda_flash_attn_ext_vec_case 1\n");
             ggml_sycl_flash_attn_ext_vec_case_impl<D, cols_per_block, type_K, type_V, use_logit_softcap>(ctx, dst);
         } else {
             constexpr bool use_logit_softcap = true;
+            printf("zjy ggml_cuda_flash_attn_ext_vec_case 2\n");
             ggml_sycl_flash_attn_ext_vec_case_impl<D, cols_per_block, type_K, type_V, use_logit_softcap>(ctx, dst);
         }
 
@@ -708,11 +984,14 @@ void ggml_sycl_flash_attn_ext_vec_case(ggml_backend_sycl_context & ctx, ggml_ten
     constexpr int cols_per_block = 2;
     if (logit_softcap == 0.0f) {
         constexpr bool use_logit_softcap = false;
+        printf("zjy ggml_cuda_flash_attn_ext_vec_case 3\n");
         ggml_sycl_flash_attn_ext_vec_case_impl<D, cols_per_block, type_K, type_V, use_logit_softcap>(ctx, dst);
     } else {
         constexpr bool use_logit_softcap = true;
+        printf("zjy ggml_cuda_flash_attn_ext_vec_case 4\n");
         ggml_sycl_flash_attn_ext_vec_case_impl<D, cols_per_block, type_K, type_V, use_logit_softcap>(ctx, dst);
     }
+    printf("zjy ggml_cuda_flash_attn_ext_vec_case done\n");
 }
 
 #define DECL_FATTN_VEC_CASE(D, type_K, type_V)                              \
@@ -747,3 +1026,5 @@ EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q4_1)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q5_0)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q5_1)
 EXTERN_DECL_FATTN_VEC_CASES(256, GGML_TYPE_Q8_0)
+
+#endif // GGML_SYCL_FATTN_VEC_HPP

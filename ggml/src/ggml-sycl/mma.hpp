@@ -1,5 +1,8 @@
-#define DPCT_COMPAT_RT_VERSION 12000
-#pragma once
+#ifndef SYCL_MMA_H
+#define SYCL_MMA_H
+
+// #define DPCT_COMPAT_RT_VERSION 12000
+
 // This file contains primitives that expose the tensor core PTX instructions for SYCL code.
 // The primitives can be used in a similar way as the nvsycl::wmma interface but with a well-defined memory layout.
 // The documentation for the PTX instructions can be found under:
@@ -22,29 +25,40 @@
 #include "common.hpp"
 #include <cmath>
 
-#if DPCT_COMPAT_RT_VERSION >= 11080
+// #if DPCT_COMPAT_RT_VERSION >= 11080
 
-static __dpct_inline__ int ggml_sycl_movmatrix(const int x) {
-    int ret = 0;
+// static __dpct_inline__ int ggml_sycl_movmatrix(const int x) {
+//     int ret = 0;
 
-#ifdef TURING_MMA_AVAILABLE
-    /*
-    DPCT1053:13: Migration of device assembly code is not supported.
-    */
-    asm("movmatrix.sync.aligned.m8n8.trans.b16 %0, %1;" : "=r"(ret) : "r"(x));
-#else
-    GGML_UNUSED(x);
-#endif // defined(TURING_MMA_AVAILABLE)
-    return ret;
+// #ifdef TURING_MMA_AVAILABLE
+//     /*
+//     DPCT1053:13: Migration of device assembly code is not supported.
+//     */
+//     asm("movmatrix.sync.aligned.m8n8.trans.b16 %0, %1;" : "=r"(ret) : "r"(x));
+// #else
+//     GGML_UNUSED(x);
+// #endif // defined(TURING_MMA_AVAILABLE)
+//     return ret;
+// }
+
+// #else
+
+template <typename T>
+static __dpct_inline__ T shfl_sync_sycl(T var, int srcLane, int width = 32) {
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    auto sub_group = item_ct1.get_sub_group();
+    uint32_t local_id = sub_group.get_local_linear_id();
+    uint32_t start_index = (local_id / width) * width;
+    uint32_t target_index = start_index + (srcLane % width);
+    return sycl::select_from_group(sub_group, var, target_index);
 }
 
-#else
-
-static __device__ __forceinline__ int ggml_sycl_movmatrix(const int x) {
+static __dpct_inline__ int ggml_sycl_movmatrix(const int x) {
+    auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     // Imagine transposing row-major matrix to column-major matrix.
-    const int src_i_low  = 2 * (threadIdx.x % 4);
+    const int src_i_low  = 2 * (item_ct1.get_local_id(2) % 4);
     const int src_i_high = src_i_low + 1;
-    const int src_j      = threadIdx.x / 4;
+    const int src_j      = item_ct1.get_local_id(2) / 4;
 
     const int src_laneid_low  = src_i_low  * 4 + src_j / 2;
     const int src_laneid_high = src_i_high * 4 + src_j / 2;
@@ -52,13 +66,15 @@ static __device__ __forceinline__ int ggml_sycl_movmatrix(const int x) {
     const int shift_low  = ((src_j + 0) % 2) * 16;
     const int shift_high = ((src_j + 1) % 2) * 16;
 
-    const int ret_low  = (__shfl_sync(0xFFFFFFFF, x, src_laneid_low,  WARP_SIZE) >> shift_low)  & 0x0000FFFF;
-    const int ret_high = (__shfl_sync(0xFFFFFFFF, x, src_laneid_high, WARP_SIZE) << shift_high) & 0xFFFF0000;
-
+    // const int ret_low  = (__shfl_sync(0xFFFFFFFF, x, src_laneid_low,  WARP_32_SIZE) >> shift_low)  & 0x0000FFFF;
+    // const int ret_high = (__shfl_sync(0xFFFFFFFF, x, src_laneid_high, WARP_32_SIZE) << shift_high) & 0xFFFF0000;
+    const int ret_low  = (shfl_sync_sycl(x, src_laneid_low,  WARP_32_SIZE) >> shift_low)  & 0x0000FFFF;
+    const int ret_high = (shfl_sync_sycl(x, src_laneid_high, WARP_32_SIZE) << shift_high) & 0xFFFF0000;
     return ret_low | ret_high;
 }
 
-#endif // SYCLRT_VERSION >= 11080
+
+// #endif // SYCLRT_VERSION >= 11080
 
 static __dpct_inline__ sycl::half2 ggml_sycl_movmatrix(const sycl::half2 x) {
     sycl::half2 ret;
@@ -73,42 +89,6 @@ namespace ggml_sycl_mma {
         static constexpr int I  = I_;
         static constexpr int J  = J_;
 
-#if defined(GGML_USE_HIP)
-        static constexpr int ne = I * J / 64;
-        T x[ne] = {0};
-
-        static __device__ __forceinline__ int get_i(const int l) {
-            if constexpr (I == 64 && J == 2) { // Special tile size to load <16, 4> as <16, 8>
-                return threadIdx.x % 16;
-            } else if constexpr (I == 16 && J == 8) {
-                return threadIdx.x % 16;
-            } else if constexpr (I == 32 && J == 4) {
-                return threadIdx.x % 32;
-            } else if constexpr (I == 16 && J == 16) {
-                return 4 * (threadIdx.x / 16) + l;
-            } else if constexpr (I == 32 && J == 32) {
-                return 4 * (threadIdx.x / 32) + 8 * (l / 4) + (l % 4);
-            } else {
-                static_assert(I == -1 && J == -1, "template specialization not implemented");
-            }
-        }
-
-        static __device__ __forceinline__ int get_j(const int l) {
-            if constexpr (I == 64 && J == 2) { // Special tile size to load <16, 4> as <16, 8>
-                return (2 * ((threadIdx.x / 16) % 2) + l);
-            } else if constexpr (I == 16 && J == 8) {
-                return 2 * (threadIdx.x / 16) + l;
-            } else if constexpr (I == 32 && J == 4) {
-                return 2 * (threadIdx.x / 32) + l;
-            } else if constexpr (I == 16 && J == 16) {
-                return threadIdx.x % 16;
-            } else if constexpr (I == 32 && J == 32) {
-                return threadIdx.x % 32;
-            } else {
-                static_assert(I == -1 && J == -1, "template specialization not implemented");
-            }
-        }
-#else
         static constexpr int ne = I * J / 32;
         T x[ne] = {0};
 
@@ -139,13 +119,12 @@ namespace ggml_sycl_mma {
                 static_assert(I == -1 && J == -1, "template specialization not implemented");
             }
         }
-#endif // defined(GGML_USE_HIP)
     };
 
     template <int I_, int J_> struct tile<I_, J_, sycl::half2> {
         static constexpr int I  = I_;
         static constexpr int J  = J_;
-        static constexpr int ne = I * J / WARP_SIZE;
+        static constexpr int ne = I * J / WARP_32_SIZE;
         sycl::half2          x[ne] = {
             { 0.0f, 0.0f }
         };
@@ -180,7 +159,7 @@ namespace ggml_sycl_mma {
     template <int I_, int J_> struct tile<I_, J_, sycl::vec<sycl::ext::oneapi::bfloat16, 2>> {
         static constexpr int I  = I_;
         static constexpr int J  = J_;
-        static constexpr int ne = I * J / WARP_SIZE;
+        static constexpr int ne = I * J / WARP_32_SIZE;
         sycl::vec<sycl::ext::oneapi::bfloat16, 2> x[ne] = {
             { 0.0f, 0.0f }
         };
@@ -258,7 +237,7 @@ namespace ggml_sycl_mma {
         int *           xi       = (int *) t.x;
         const int * xs       = (const int *) xs0 + (item_ct1.get_local_id(2) % t.I) * stride +
                          ((item_ct1.get_local_id(2) / t.I) * (t.J / 2)) % t.J;
-    dpct::experimental::matrix::ldmatrix((uintptr_t) xs, &xi[0], &xi[1]);
+    dpct::ldmatrix((uintptr_t) xs, &xi[0], &xi[1]);
 #else
         load_generic(t, xs0, stride);
 #endif // TURING_MMA_AVAILABLE
@@ -270,7 +249,7 @@ namespace ggml_sycl_mma {
         int * xi = (int *) t.x;
         const int * xs =
             (const int *) xs0 + (sycl::ext::oneapi::this_work_item::get_nd_item<3>().get_local_id(2) % t.I) * stride;
-    dpct::experimental::matrix::ldmatrix((uintptr_t) xs, &xi[0], &xi[1]);
+    dpct::ldmatrix((uintptr_t) xs, &xi[0], &xi[1]);
 #else
         load_generic(xs0, stride);
         GGML_UNUSED(t);
@@ -284,7 +263,7 @@ namespace ggml_sycl_mma {
         int *           xi       = (int *) t.x;
         const int * xs       = (const int *) xs0 + (item_ct1.get_local_id(2) % t.I) * stride +
                          (item_ct1.get_local_id(2) / t.I) * (t.J / 2);
-    dpct::experimental::matrix::ldmatrix((uintptr_t) xs, &xi[0], &xi[1], &xi[2], &xi[3]);
+    dpct::ldmatrix((uintptr_t) xs, &xi[0], &xi[1], &xi[2], &xi[3]);
 #else
         load_generic(t, xs0, stride);
 #endif // TURING_MMA_AVAILABLE
@@ -292,77 +271,40 @@ namespace ggml_sycl_mma {
 
     template <typename T>
     static __dpct_inline__ void load_ldmatrix_trans(tile<16, 8, T> & t, const T * __restrict__ xs0, const int stride) {
-#ifdef TURING_MMA_AVAILABLE
         auto            item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
         int *           xi       = (int *) t.x;
         const int * xs       = (const int *) xs0 + (item_ct1.get_local_id(2) % t.I) * stride +
                          (item_ct1.get_local_id(2) / t.I) * (t.J / 2);
-    dpct::experimental::matrix::ldmatrix((uintptr_t) xs, &xi[0], &xi[2], &xi[1], &xi[3], true);
-#else
-        GGML_UNUSED_VARS(t, xs0, stride);
-#endif // TURING_MMA_AVAILABLE
+    dpct::ldmatrix((uintptr_t) xs, &xi[0], &xi[2], &xi[1], &xi[3], true);
     }
 
     static __dpct_inline__ void mma(tile<16, 8, int> & D, const tile<16, 4, int> & A, const tile<8, 4, int> & B) {
-#ifdef TURING_MMA_AVAILABLE
-#    if DPCT_COMPATIBILITY_TEMP >= GGML_SYCL_CC_AMPERE
-    {
+        sycl::ext::oneapi::experimental::printf("mma 16/8/int 8/4\n");
         volatile int32_t *     d_mat_frag_ct1[4] = { &D.x[0], &D.x[1], &D.x[2], &D.x[3] };
         sycl::vec<uint32_t, 2> a_mat_frag_ct1(A.x[0], A.x[1]);
         sycl::vec<uint32_t, 1> b_mat_frag_ct1(B.x[0]);
         sycl::vec<int32_t, 4>  c_mat_frag_ct1(D.x[0], D.x[1], D.x[2], D.x[3]);
-        dpct::experimental::matrix::mma<16, 8, 16, int8_t, int32_t>(reinterpret_cast<volatile void **>(d_mat_frag_ct1),
+        dpct::mma<16, 8, 16, int8_t, int32_t>(reinterpret_cast<volatile void **>(d_mat_frag_ct1),
                                                                     &a_mat_frag_ct1, &b_mat_frag_ct1, &c_mat_frag_ct1);
     }
-#else
-        // On Turing m16n8k16 mma is not available, use 2x m8n8k16 mma instead:
-        asm("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0, %1}, {%2}, {%3}, {%0, %1};"
-            : "+r"(D.x[0]), "+r"(D.x[1])
-            : "r"(A.x[0]), "r"(B.x[0]));
-        asm("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0, %1}, {%2}, {%3}, {%0, %1};"
-            : "+r"(D.x[2]), "+r"(D.x[3])
-            : "r"(A.x[1]), "r"(B.x[0]));
-#endif // __SYCL_ARCH__ >= GGML_SYCL_CC_AMPERE
-#else
-        GGML_UNUSED_VARS(D, A, B);
-#endif // TURING_MMA_AVAILABLE
-    }
+
 
     static __dpct_inline__ void mma(tile<16, 8, int> & D, const tile<16, 8, int> & A, const tile<8, 8, int> & B) {
-#ifdef TURING_MMA_AVAILABLE
-#    if DPCT_COMPATIBILITY_TEMP >= GGML_SYCL_CC_AMPERE
-    {
+        sycl::ext::oneapi::experimental::printf("mma 16/8/int 8/8\n");
         volatile int32_t *     d_mat_frag_ct1[4] = { &D.x[0], &D.x[1], &D.x[2], &D.x[3] };
         sycl::vec<uint32_t, 4> a_mat_frag_ct1(A.x[0], A.x[1], A.x[2], A.x[3]);
         sycl::vec<uint32_t, 2> b_mat_frag_ct1(B.x[0], B.x[1]);
         sycl::vec<int32_t, 4>  c_mat_frag_ct1(D.x[0], D.x[1], D.x[2], D.x[3]);
-        dpct::experimental::matrix::mma<16, 8, 32, int8_t, int32_t>(reinterpret_cast<volatile void **>(d_mat_frag_ct1),
+        dpct::mma<16, 8, 32, int8_t, int32_t>(reinterpret_cast<volatile void **>(d_mat_frag_ct1),
                                                                     &a_mat_frag_ct1, &b_mat_frag_ct1, &c_mat_frag_ct1);
-    }
-#else
-        // On Turing m16n8k32 mma is not available, use 4x m8n8k16 mma instead:
-        asm("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0, %1}, {%2}, {%3}, {%0, %1};"
-            : "+r"(D.x[0]), "+r"(D.x[1])
-            : "r"(A.x[0]), "r"(B.x[0]));
-        asm("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0, %1}, {%2}, {%3}, {%0, %1};"
-            : "+r"(D.x[2]), "+r"(D.x[3])
-            : "r"(A.x[1]), "r"(B.x[0]));
-        asm("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0, %1}, {%2}, {%3}, {%0, %1};"
-            : "+r"(D.x[0]), "+r"(D.x[1])
-            : "r"(A.x[2]), "r"(B.x[1]));
-        asm("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0, %1}, {%2}, {%3}, {%0, %1};"
-            : "+r"(D.x[2]), "+r"(D.x[3])
-            : "r"(A.x[3]), "r"(B.x[1]));
-#endif // __SYCL_ARCH__ >= GGML_SYCL_CC_AMPERE
-#else
-        GGML_UNUSED_VARS(D, A, B);
-#endif // TURING_MMA_AVAILABLE
     }
 
     static __dpct_inline__ void mma(tile<16, 4, sycl::half2> &       D,
                                     const tile<16, 8, sycl::half2> & A,
                                     const tile<8, 8, sycl::half2> &  B) {
+        sycl::ext::oneapi::experimental::printf("mma 16/4 not suppored\n");
 #ifdef TURING_MMA_AVAILABLE
+        sycl::ext::oneapi::experimental::printf("mma 16/4 not suppored\n");
         const int * Axi = (const int *) A.x;
         const int * Bxi = (const int *) B.x;
         int       * Dxi = (int       *) D.x;
@@ -390,6 +332,7 @@ namespace ggml_sycl_mma {
     static __dpct_inline__ void mma(tile<16, 8, sycl::half2> &       D,
                                     const tile<16, 8, sycl::half2> & A,
                                     const tile<16, 8, sycl::half2> & B) {
+        sycl::ext::oneapi::experimental::printf("mma 16/8 not suppored\n");
 #ifdef TURING_MMA_AVAILABLE
         const int * Axi = (const int *) A.x;
         const int * Bxi = (const int *) B.x;
@@ -428,7 +371,8 @@ namespace ggml_sycl_mma {
     }
 
     static __dpct_inline__ void mma(tile<16, 8, float> & D, const tile<16, 8, float> & A, const tile<8, 8, float> & B) {
-#ifdef AMPERE_MMA_AVAILABLE
+        sycl::ext::oneapi::experimental::printf("mma 16/8/fp32 not suppored\n");
+        #ifdef AMPERE_MMA_AVAILABLE
         const int * Axi = (const int *) A.x;
         const int * Bxi = (const int *) B.x;
         int       * Dxi = (int       *) D.x;
@@ -447,36 +391,27 @@ namespace ggml_sycl_mma {
     static __dpct_inline__ void mma(tile<16, 8, float> &             D,
                                     const tile<16, 8, sycl::half2> & A,
                                     const tile<8, 8, sycl::half2> &  B) {
-#ifdef TURING_MMA_AVAILABLE
+        sycl::ext::oneapi::experimental::printf("mma 16/8\n");
         const int * Axi = (const int *) A.x;
         const int * Bxi = (const int *) B.x;
         int       * Dxi = (int       *) D.x;
-#    if DPCT_COMPATIBILITY_TEMP >= GGML_SYCL_CC_AMPERE
-    {
-        volatile float *       d_mat_frag_ct1[4] = { &Dxi[0], &Dxi[1], &Dxi[2], &Dxi[3] };
-        sycl::vec<uint32_t, 4> a_mat_frag_ct1(Axi[0], Axi[1], Axi[2], Axi[3]);
-        sycl::vec<uint32_t, 2> b_mat_frag_ct1(Bxi[0], Bxi[1]);
-        sycl::vec<float, 4>    c_mat_frag_ct1(Dxi[0], Dxi[1], Dxi[2], Dxi[3]);
-        dpct::experimental::matrix::mma<16, 8, 16, sycl::half, float>(
-            reinterpret_cast<volatile void **>(d_mat_frag_ct1), &a_mat_frag_ct1, &b_mat_frag_ct1, &c_mat_frag_ct1);
-    }
-#else
-        // On Turing m16n8k16 mma is not available, use 2x m8n8k8 mma instead:
-        asm("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};"
-            : "+r"(Dxi[0]), "+r"(Dxi[1]), "+r"(Dxi[2]), "+r"(Dxi[3])
-            : "r"(Axi[0]), "r"(Axi[1]), "r"(Bxi[0]));
-        asm("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};"
-            : "+r"(Dxi[0]), "+r"(Dxi[1]), "+r"(Dxi[2]), "+r"(Dxi[3])
-            : "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[1]));
-#endif // __SYCL_ARCH__ >= GGML_SYCL_CC_AMPERE
-#else
-        GGML_UNUSED_VARS(D, A, B);
-#endif // TURING_MMA_AVAILABLE
+
+      volatile float* d_mat_frag_ct1[4] = {
+          (float*)&Dxi[0], (float*)&Dxi[1], (float*)&Dxi[2], (float*)&Dxi[3]};
+      sycl::vec<uint32_t, 4> a_mat_frag_ct1(Axi[0], Axi[1], Axi[2], Axi[3]);
+      sycl::vec<uint32_t, 2> b_mat_frag_ct1(Bxi[0], Bxi[1]);
+      sycl::vec<float, 4> c_mat_frag_ct1(Dxi[0], Dxi[1], Dxi[2], Dxi[3]);
+      dpct::mma<16, 8, 16, sycl::half, float>(
+          reinterpret_cast<volatile void**>(d_mat_frag_ct1),
+          &a_mat_frag_ct1,
+          &b_mat_frag_ct1,
+          &c_mat_frag_ct1);
     }
 
     static __dpct_inline__ void mma(tile<16, 8, float> &                                           D,
                                     const tile<16, 8, sycl::vec<sycl::ext::oneapi::bfloat16, 2>> & A,
                                     const tile<8, 8, sycl::vec<sycl::ext::oneapi::bfloat16, 2>> &  B) {
+        sycl::ext::oneapi::experimental::printf("mma 16/8/fp32 8/8 not suppored\n");
 #ifdef AMPERE_MMA_AVAILABLE
         const int * Axi = (const int *) A.x;
         const int * Bxi = (const int *) B.x;
@@ -495,52 +430,52 @@ namespace ggml_sycl_mma {
 
     static __dpct_inline__ void mma(tile<16, 16, float> &            D,
                                     const tile<16, 8, sycl::half2> & A,
-                                    const tile<16, 8, sycl::half2> & B) {
-#ifdef TURING_MMA_AVAILABLE
+                                    const tile<16, 8, sycl::half2> & B,
+                                    int64_t id
+                                ) {
+        // sycl::ext::oneapi::experimental::printf("mma 16/16\n");
         const int * Axi = (const int *) A.x;
         const int * Bxi = (const int *) B.x;
         int       * Dxi = (int       *) D.x;
-#    if DPCT_COMPATIBILITY_TEMP >= GGML_SYCL_CC_AMPERE
-    {
-        volatile float *       d_mat_frag_ct1[4] = { &Dxi[0], &Dxi[1], &Dxi[2], &Dxi[3] };
-        sycl::vec<uint32_t, 4> a_mat_frag_ct1(Axi[0], Axi[1], Axi[2], Axi[3]);
-        sycl::vec<uint32_t, 2> b_mat_frag_ct1(Bxi[0], Bxi[2]);
-        sycl::vec<float, 4>    c_mat_frag_ct1(Dxi[0], Dxi[1], Dxi[2], Dxi[3]);
-        dpct::experimental::matrix::mma<16, 8, 16, sycl::half, float>(
-            reinterpret_cast<volatile void **>(d_mat_frag_ct1), &a_mat_frag_ct1, &b_mat_frag_ct1, &c_mat_frag_ct1);
-    }
-    {
-        volatile float *       d_mat_frag_ct1[4] = { &Dxi[4], &Dxi[5], &Dxi[6], &Dxi[7] };
-        sycl::vec<uint32_t, 4> a_mat_frag_ct1(Axi[0], Axi[1], Axi[2], Axi[3]);
-        sycl::vec<uint32_t, 2> b_mat_frag_ct1(Bxi[1], Bxi[3]);
-        sycl::vec<float, 4>    c_mat_frag_ct1(Dxi[4], Dxi[5], Dxi[6], Dxi[7]);
-        dpct::experimental::matrix::mma<16, 8, 16, sycl::half, float>(
-            reinterpret_cast<volatile void **>(d_mat_frag_ct1), &a_mat_frag_ct1, &b_mat_frag_ct1, &c_mat_frag_ct1);
-    }
-#else
-        // On Turing m16n8k16 mma is not available, use 4x m8n8k8 mma instead:
-        asm("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};"
-            : "+r"(Dxi[0]), "+r"(Dxi[1]), "+r"(Dxi[2]), "+r"(Dxi[3])
-            : "r"(Axi[0]), "r"(Axi[1]), "r"(Bxi[0]));
-        asm("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};"
-            : "+r"(Dxi[0]), "+r"(Dxi[1]), "+r"(Dxi[2]), "+r"(Dxi[3])
-            : "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[2]));
-        asm("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};"
-            : "+r"(Dxi[4]), "+r"(Dxi[5]), "+r"(Dxi[6]), "+r"(Dxi[7])
-            : "r"(Axi[0]), "r"(Axi[1]), "r"(Bxi[1]));
-        asm("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};"
-            : "+r"(Dxi[4]), "+r"(Dxi[5]), "+r"(Dxi[6]), "+r"(Dxi[7])
-            : "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[3]));
-#endif // __SYCL_ARCH__ >= GGML_SYCL_CC_AMPERE
-#else
-        GGML_UNUSED_VARS(D, A, B);
-#endif // TURING_MMA_AVAILABLE
+        if(id==256) sycl::ext::oneapi::experimental::printf("mm A=%d %d %d %d B=%d %d %d %d D=%d %d %d %d %d %d %d %d\n",
+                Axi[0],Axi[1],Axi[2],Axi[3],
+              Bxi[0], Bxi[2],Bxi[1], Bxi[3],
+              Dxi[0], Dxi[1], Dxi[2], Dxi[3], Dxi[4], Dxi[5], Dxi[6], Dxi[7]);
+      {
+      volatile float* d_mat_frag_ct1[4] = {
+          (float*)&Dxi[0], (float*)&Dxi[1], (float*)&Dxi[2], (float*)&Dxi[3]};
+      sycl::vec<uint32_t, 4> a_mat_frag_ct1(Axi[0], Axi[1], Axi[2], Axi[3]);
+      sycl::vec<uint32_t, 2> b_mat_frag_ct1(Bxi[0], Bxi[2]);
+      sycl::vec<float, 4> c_mat_frag_ct1(Dxi[0], Dxi[1], Dxi[2], Dxi[3]);
+      dpct::mma<16, 8, 16, sycl::half, float>(
+          reinterpret_cast<volatile void**>(d_mat_frag_ct1),
+          &a_mat_frag_ct1,
+          &b_mat_frag_ct1,
+          &c_mat_frag_ct1);
+      }
+      {
+      volatile float* d_mat_frag_ct1[4] = {
+          (float*)&Dxi[4], (float*)&Dxi[5], (float*)&Dxi[6], (float*)&Dxi[7]};
+      sycl::vec<uint32_t, 4> a_mat_frag_ct1(Axi[0], Axi[1], Axi[2], Axi[3]);
+      sycl::vec<uint32_t, 2> b_mat_frag_ct1(Bxi[1], Bxi[3]);
+      sycl::vec<float, 4> c_mat_frag_ct1(Dxi[4], Dxi[5], Dxi[6], Dxi[7]);
+      dpct::mma<16, 8, 16, sycl::half, float>(
+          reinterpret_cast<volatile void**>(d_mat_frag_ct1),
+          &a_mat_frag_ct1,
+          &b_mat_frag_ct1,
+          &c_mat_frag_ct1);
+      }
+
+      if(id==256) sycl::ext::oneapi::experimental::printf("mm D=%d %d %d %d %d %d %d %d\n",
+              Dxi[0], Dxi[1], Dxi[2], Dxi[3], Dxi[4], Dxi[5], Dxi[6], Dxi[7]);
+
     }
 
     static __dpct_inline__ void mma(tile<16, 16, int> &      D,
                                     const tile<16, 8, int> & A,
                                     const tile<16, 8, int> & B,
                                     const sycl::stream &     stream_ct1) {
+        sycl::ext::oneapi::experimental::printf("mma 16/16/int not suppored\n");
 #if defined(AMD_MFMA_AVAILABLE)
         using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
         int32x4_t * acc = (int32x4_t *) D.x;
@@ -568,6 +503,7 @@ namespace ggml_sycl_mma {
                                     const tile<32, 4, int> & A,
                                     const tile<32, 4, int> & B,
                                     const sycl::stream &     stream_ct1) {
+        sycl::ext::oneapi::experimental::printf("mma 32/32 not suppored\n");
 #if defined(AMD_MFMA_AVAILABLE)
         using int32x16_t = __attribute__((__vector_size__(16 * sizeof(int)))) int;
         int32x16_t * acc = (int32x16_t *) D.x;
@@ -591,3 +527,5 @@ namespace ggml_sycl_mma {
 #endif // AMD_MFMA_AVAILABLE
     }
 }
+
+#endif //SYCL_MMA_H

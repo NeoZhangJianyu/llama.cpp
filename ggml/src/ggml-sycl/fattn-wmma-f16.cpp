@@ -3,11 +3,21 @@
 // Long-term the WMMA code should be replaced with a dedicated Volta implementation.
 
 #include <sycl/sycl.hpp>
+#include <sycl/ext/oneapi/matrix/matrix-unified.hpp>
+#include <sycl/ext/oneapi/work_group_static.hpp>
+#include <sycl/detail/core.hpp>
+#include <sycl/ext/oneapi/matrix/matrix.hpp>
+
 #include "dpct/helper.hpp"
 #include "common.hpp"
 #include "sycl/half_type.hpp"
 #include "fattn-common.hpp"
 #include "fattn-wmma-f16.hpp"
+
+using namespace sycl;
+using namespace sycl::ext::oneapi::experimental::matrix;
+namespace syclex = sycl::ext::oneapi::experimental;
+
 
 #ifdef GGML_USE_WMMA_FATTN
 #if !defined(GGML_USE_HIP)
@@ -69,32 +79,51 @@ static void flash_attn_ext_f16(const char* Q,
                                const int32_t nb32,
                                const int64_t nb33,
                                const sycl::nd_item<3>& item_ct1,
+                               const sycl::stream & out,
                                uint8_t* unused_lsm) {
   // auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+ int blockId = item_ct1.get_group(2) + item_ct1.get_group(1) * item_ct1.get_group_range(2) + item_ct1.get_group(0) * item_ct1.get_group_range(2) * item_ct1.get_group_range(1);
+ int threadsPerBlock = item_ct1.get_local_range(2) * item_ct1.get_local_range(1) * item_ct1.get_local_range(0);
+ int threadInBlockId = item_ct1.get_local_id(2) + item_ct1.get_local_id(1) * item_ct1.get_local_range(2) + item_ct1.get_local_id(0) * item_ct1.get_local_range(2) * item_ct1.get_local_range(1);
+ int id = blockId * threadsPerBlock + threadInBlockId;
+ if(id==0) sycl::ext::oneapi::experimental::printf("flash_attn_ext_f16 entry id=%d\n", id);
 
-#if defined(FLASH_ATTN_AVAILABLE) && (DPCT_COMPATIBILITY_TEMP == GGML_SYCL_CC_VOLTA || \
-                                      (defined(GGML_HIP_ROCWMMA_FATTN) && defined(GGML_USE_WMMA_FATTN)))
+#if defined(FLASH_ATTN_AVAILABLE)
+    if(id==0) sycl::ext::oneapi::experimental::printf("flash_attn_ext_f16 id=%d 1\n", id);
     // Skip unused kernel variants for faster compilation:
     if (use_logit_softcap && !(D == 128 || D == 256)) {
+        if(id==0) sycl::ext::oneapi::experimental::printf("flash_attn_ext_f16 id=%d exit1\n", id);
         return;
     }
 
+    if(id==0) sycl::ext::oneapi::experimental::printf("flash_attn_ext_f16 entry id %d\n", id);
+
     //In this kernel Q, K, V are matrices while i, j, k are matrix indices.
 
-    constexpr int warp_size = ggml_sycl_get_physical_warp_size();
+    constexpr int warp_size = WARP_32_SIZE;
 
     const int ic0 = ncols*item_ct1.get_group(2); // Index of the first Q/QKV column to work on.
 
     static_assert(D <= FATTN_KQ_STRIDE, "D must be <= FATTN_KQ_STRIDE.");
     static_assert(ncols == 8 || ncols % 16 == 0, "ncols must be 8 or a multiple of 16.");
-    constexpr int frag_m = ncols == 8 ? 32 : 16;
-    constexpr int frag_n = ncols == 8 ?  8 : 16;
+    // constexpr int frag_m = ncols == 8 ? 32 : 16;
+    // constexpr int frag_n = ncols == 8 ?  8 : 16;
+    constexpr int frag_m = 8;
+    constexpr int frag_n = 8; //Arc, 16 - PVC
+    constexpr int frag_k = 16;
     static_assert(D % frag_m == 0, "If ncols == 8 then D % frag_m must be 0.");
-    typedef wmma::fragment<wmma::matrix_a,    frag_m, frag_n, 16, half, wmma::row_major> frag_a_K;
-    typedef wmma::fragment<wmma::matrix_a,    frag_m, frag_n, 16, half, wmma::col_major> frag_a_V;
-    typedef wmma::fragment<wmma::matrix_b,    frag_m, frag_n, 16, half, wmma::col_major> frag_b;
-    typedef wmma::fragment<wmma::accumulator, frag_m, frag_n, 16, KQ_acc_t>                      frag_c_KQ;
-    typedef wmma::fragment<wmma::accumulator, frag_m, frag_n, 16, half>                          frag_c_VKQ;
+    // typedef wmma::fragment<wmma::matrix_a,    frag_m, frag_n, 16, half, wmma::row_major> frag_a_K;
+    // typedef wmma::fragment<wmma::matrix_a,    frag_m, frag_n, 16, half, wmma::col_major> frag_a_V;
+    // typedef wmma::fragment<wmma::matrix_b,    frag_m, frag_n, 16, half, wmma::col_major> frag_b;
+    // typedef wmma::fragment<wmma::accumulator, frag_m, frag_n, 16, KQ_acc_t>                      frag_c_KQ;
+    // typedef wmma::fragment<wmma::accumulator, frag_m, frag_n, 16, half>                          frag_c_VKQ;
+
+    sycl::sub_group sg = item_ct1.get_sub_group();
+    typedef joint_matrix<sycl::sub_group, half, use::a, frag_m, frag_k, layout::row_major> frag_a_K;
+    typedef joint_matrix<sycl::sub_group, half, use::a, frag_m, frag_k, layout::row_major> frag_a_V;
+    typedef joint_matrix<sycl::sub_group, half, use::b, frag_k, frag_n, layout::row_major> frag_b;
+    typedef joint_matrix<sycl::sub_group, KQ_acc_t, use::accumulator, frag_m, frag_n> frag_c_KQ;
+    typedef joint_matrix<sycl::sub_group, KQ_acc_t, use::accumulator, frag_m, frag_n> frag_c_VKQ;
 
     constexpr int KQ_stride_tc  = nwarps*frag_m; // Number of KQ rows calculated in parallel.
     constexpr int VKQ_ratio = KQ_stride_tc/VKQ_stride; // Number of parallel VKQ accumulators needed to keep all warps busy.
@@ -119,7 +148,7 @@ static void flash_attn_ext_f16(const char* Q,
     const int stride_KV = nb11 / sizeof(half);
 
     const float slopef = get_alibi_slope(max_bias, head, n_head_log2, m0, m1);
-    const half  slopeh = __float2half(slopef);
+    const half  slopeh = sycl::half(slopef);
     const half2 slope2 = make_half2(slopef, slopef);
 
     const half2 logit_softcap_2 = make_half2(logit_softcap, logit_softcap);
@@ -131,19 +160,42 @@ static void flash_attn_ext_f16(const char* Q,
     constexpr int mem_VKQ_parts = VKQ_ratio*ncols*D_padded;
     // __shared__ half KQ[mem_KQ >= mem_VKQ_parts ? mem_KQ : mem_VKQ_parts];
     // __shared__ half VKQ[ncols*D_padded]; // Accumulator for final VKQ slice.
-    size_t lsm_size1 = mem_KQ >= mem_VKQ_parts ? mem_KQ : mem_VKQ_parts*sizeof(half);
-    size_t lsm_size2 = ncols*D_padded*sizeof(half);
-    size_t local_share_mem_size = lsm_size1+lsm_size2;
+    constexpr size_t lsm_size1 = mem_KQ >= mem_VKQ_parts ? mem_KQ : mem_VKQ_parts;
+    constexpr size_t lsm_size2 = ncols*D_padded;
+    constexpr size_t local_share_mem_size = (lsm_size1+lsm_size2)*sizeof(half);
     syclex::work_group_static<char[local_share_mem_size]> lsm;
+
     half *KQ = (half*) &lsm;
-    half *VKQ = (half*) ((char*)&lsm + lsm_size1);
+    half *VKQ = KQ + lsm_size1;
+
+    auto KQ_ptr = address_space_cast<
+        sycl::access::address_space::global_space,
+        sycl::access::decorated::yes>(KQ);
+
+    auto KQ_c_ptr = address_space_cast<
+        sycl::access::address_space::global_space,
+        sycl::access::decorated::yes>((KQ_acc_t*)KQ);
+
+    auto K_h_ptr = address_space_cast<
+        sycl::access::address_space::global_space,
+        sycl::access::decorated::yes>(K_h);
+
+    auto V_h_ptr = address_space_cast<
+        sycl::access::address_space::global_space,
+        sycl::access::decorated::yes>(V_h);
+    // auto B_ptr = address_space_cast<
+    //     sycl::access::address_space::global_space,
+    //     sycl::access::decorated::yes>(B);
+    // auto C_ptr = address_space_cast<
+    //     sycl::access::address_space::global_space,
+    //     sycl::access::decorated::yes>(C);
 
     float * KQ_f = (float *) KQ;
     half2 * KQ2 = (half2 *) KQ;
 
-    float    KQ_rowsum_f[ncols/nwarps] = {0.0f};
-    float       KQ_max_f[ncols/nwarps];
-    float KQ_max_scale_f[ncols/nwarps] = {0.0f};
+    float    KQ_rowsum_f[ncols/nwarps] = {};
+    float       KQ_max_f[ncols/nwarps] = {};
+    float KQ_max_scale_f[ncols/nwarps] = {};
 
 #pragma unroll
     for (int j = 0; j < ncols/nwarps; ++j) {
@@ -187,18 +239,19 @@ static void flash_attn_ext_f16(const char* Q,
         }
     }
 
-    __syncthreads();
+    item_ct1.barrier(sycl::access::fence_space::local_space);
 
     // Load Q into tensor core fragments/registers since it will be used frequently:
 #pragma unroll
     for (int i0 = 0; i0 < D; i0 += 16) {
 #pragma unroll
         for (int j0 = 0; j0 < ncols; j0 += frag_n) {
-            wmma::load_matrix_sync(Q_b[i0/16][j0/frag_n], KQ + j0*D_padded + i0, D_padded);
+            // wmma::load_matrix_sync(Q_b[i0/16][j0/frag_n], KQ_ptr + j0*D_padded + i0, D_padded);
+            joint_matrix_load(sg, Q_b[i0/16][j0/frag_n], KQ_ptr + j0*D_padded + i0, D_padded);
         }
     }
 
-    __syncthreads();
+    item_ct1.barrier(sycl::access::fence_space::local_space);
 
     // Iterate over ne11 == previous tokens:
     const int k_VKQ_max = KV_max ? KV_max[sequence * item_ct1.get_group_range(2) + item_ct1.get_group(2)] : ne11;
@@ -209,24 +262,30 @@ static void flash_attn_ext_f16(const char* Q,
             frag_c_KQ KQ_c[ncols/frag_n];
 #pragma unroll
             for (int j = 0; j < ncols/frag_n; ++j) {
-                wmma::fill_fragment(KQ_c[j], static_cast<KQ_acc_t>(0.0f));
+                // wmma::fill_fragment(KQ_c[j], static_cast<KQ_acc_t>(0.0f));
+                joint_matrix_fill(sg, KQ_c[j], 0);
             }
 #pragma unroll
             for (int k_KQ_0 = 0; k_KQ_0 < D; k_KQ_0 += 16) {
                 frag_a_K K_a;
-                wmma::load_matrix_sync(K_a, K_h + int64_t(k_VKQ_0 + i_KQ_0 + frag_m*item_ct1.get_local_id(1))*stride_KV + k_KQ_0, stride_KV);
+                // wmma::load_matrix_sync(K_a, K_h + int64_t(k_VKQ_0 + i_KQ_0 + frag_m*item_ct1.get_local_id(1))*stride_KV + k_KQ_0, stride_KV);
+                joint_matrix_load(sg, K_a, K_h_ptr + int64_t(k_VKQ_0 + i_KQ_0 + frag_m*item_ct1.get_local_id(1))*stride_KV + k_KQ_0, stride_KV);
 #pragma unroll
                 for (int j = 0; j < ncols/frag_n; ++j) {
-                    wmma::mma_sync(KQ_c[j], K_a, Q_b[k_KQ_0/16][j], KQ_c[j]);
+                    // wmma::mma_sync(KQ_c[j], K_a, Q_b[k_KQ_0/16][j], KQ_c[j]);
+                    joint_matrix_mad(sg, KQ_c[j], K_a, Q_b[k_KQ_0/16][j], KQ_c[j]);
                 }
             }
 #pragma unroll
             for (int j0 = 0; j0 < ncols; j0 += frag_n) {
-                wmma::store_matrix_sync((KQ_acc_t *) KQ + j0*kqs_padded + i_KQ_0 + frag_m*item_ct1.get_local_id(1), KQ_c[j0/frag_n], kqs_padded, wmma::mem_col_major);
+                // wmma::store_matrix_sync((KQ_acc_t *) KQ + j0*kqs_padded + i_KQ_0 + frag_m*item_ct1.get_local_id(1), KQ_c[j0/frag_n], kqs_padded, wmma::mem_col_major);
+                joint_matrix_store(sg, KQ_c[j0/frag_n],
+                    KQ_c_ptr + j0*kqs_padded + i_KQ_0 + frag_m*item_ct1.get_local_id(1), kqs_padded,
+                    layout::row_major);
             }
         }
 
-        __syncthreads();
+        item_ct1.barrier(sycl::access::fence_space::local_space);
 
         // Calculate softmax for each KQ column using the current max. value.
         // The divisor is stored in KQ_rowsum and will be applied at the end.
@@ -291,7 +350,7 @@ static void flash_attn_ext_f16(const char* Q,
 
                     if (use_logit_softcap) {
                         // There is no dedicated tangens hyperbolicus function for half2.
-                        KQ2_tmp[k0/warp_size] = h2exp(KQ2_tmp[k0/warp_size]*make_half2(2.0f, 2.0f));
+                        KQ2_tmp[k0/warp_size] = sycl::exp(KQ2_tmp[k0/warp_size]*make_half2(2.0f, 2.0f));
                         KQ2_tmp[k0/warp_size] = (KQ2_tmp[k0/warp_size] - make_half2(1.0f, 1.0f))
                                                /(KQ2_tmp[k0/warp_size] + make_half2(1.0f, 1.0f));
 
@@ -307,9 +366,9 @@ static void flash_attn_ext_f16(const char* Q,
                     KQ2_tmp[k0/warp_size] += mask ? slope2*mask2[(j*ne11 + k_VKQ_0)/2 + k] : make_half2(0.0f, 0.0f);
                     KQ_max_new = ggml_sycl_hmax2(KQ_max_new, KQ2_tmp[k0/warp_size]);
                 }
-                KQ_max_new = __half2half2(warp_reduce_max<warp_size>(ggml_sycl_hmax(__low2half(KQ_max_new), __high2half(KQ_max_new))));
+                KQ_max_new = sycl::half2(warp_reduce_max<warp_size>(ggml_sycl_hmax(KQ_max_new.x(), KQ_max_new.y())));
                 const half2 diff = KQ_max_h2[j0/nwarps] - KQ_max_new;
-                KQ_max_scale_h2[j0/nwarps] = h2exp(diff);
+                KQ_max_scale_h2[j0/nwarps] = sycl::exp(diff);
                 const uint32_t ftz_mask = __hgt2_mask(diff, make_half2(SOFTMAX_FTZ_THRESHOLD, SOFTMAX_FTZ_THRESHOLD));
                 *((uint32_t *) &KQ_max_scale_h2[j0/nwarps]) &= ftz_mask;
                 KQ_max_h2[j0/nwarps] = KQ_max_new;
@@ -320,7 +379,7 @@ static void flash_attn_ext_f16(const char* Q,
                     const int k = k0 + item_ct1.get_local_id(2);
 
                     const half2 diff = KQ2_tmp[k0/warp_size] - KQ_max_h2[j0/nwarps];
-                    KQ2_tmp[k0/warp_size] = h2exp(diff);
+                    KQ2_tmp[k0/warp_size] = sycl::exp(diff);
                     const uint32_t ftz_mask = __hgt2_mask(diff, make_half2(SOFTMAX_FTZ_THRESHOLD, SOFTMAX_FTZ_THRESHOLD));
                     *((uint32_t *) &KQ2_tmp[k0/warp_size]) &= ftz_mask;
                     KQ_rowsum_add += KQ2_tmp[k0/warp_size];
@@ -333,17 +392,23 @@ static void flash_attn_ext_f16(const char* Q,
             }
         }
 
-        __syncthreads();
+        item_ct1.barrier(sycl::access::fence_space::local_space);
+        // frag_b KQ_b[FATTN_KQ_STRIDE/(VKQ_ratio*16)][ncols/frag_n]; --fix compiler issue.
+        frag_b KQ_b[FATTN_KQ_STRIDE/KQ_stride_tc*VKQ_stride/16][ncols/frag_n];
 
-        frag_b KQ_b[FATTN_KQ_STRIDE/(VKQ_ratio*16)][ncols/frag_n];
 #pragma unroll
         for (int j0 = 0; j0 < ncols; j0 += frag_n) {
 #pragma unroll
             for (int k0 = 0; k0 < FATTN_KQ_STRIDE; k0 += VKQ_ratio*16) {
                 const int k = k0 + (item_ct1.get_local_id(1) % VKQ_ratio)*16;
-                wmma::load_matrix_sync(
+                // wmma::load_matrix_sync(
+                //     KQ_b[k0/(VKQ_ratio*16)][j0/frag_n],
+                //     KQ + j0*(kqar*kqs_padded) + k,
+                //     kqar*kqs_padded);
+                joint_matrix_load(
+                    sg,
                     KQ_b[k0/(VKQ_ratio*16)][j0/frag_n],
-                    KQ + j0*(kqar*kqs_padded) + k,
+                    KQ_ptr + j0*(kqar*kqs_padded) + k,
                     kqar*kqs_padded);
             }
         }
@@ -353,7 +418,8 @@ static void flash_attn_ext_f16(const char* Q,
         for (int i_VKQ_0 = 0; i_VKQ_0 < D; i_VKQ_0 += VKQ_stride) {
 #pragma unroll
             for (int j = 0; j < ncols/frag_n; ++j) {
-                wmma::fill_fragment(VKQ_c[i_VKQ_0/VKQ_stride][j], static_cast<half>(0.0f));
+                // wmma::fill_fragment(VKQ_c[i_VKQ_0/VKQ_stride][j], static_cast<half>(0.0f));
+                joint_matrix_fill(sg, VKQ_c[i_VKQ_0/VKQ_stride][j], 0);
             }
 
 #pragma unroll
@@ -361,29 +427,35 @@ static void flash_attn_ext_f16(const char* Q,
                 const int k = k0 + (item_ct1.get_local_id(1) % VKQ_ratio)*16;
 
                 frag_a_V v_a;
-                wmma::load_matrix_sync(v_a, V_h + int64_t(k_VKQ_0 + k)*stride_KV + i_VKQ_0 + frag_m*(item_ct1.get_local_id(1)/VKQ_ratio), stride_KV);
+                // wmma::load_matrix_sync(v_a, V_h + int64_t(k_VKQ_0 + k)*stride_KV + i_VKQ_0 + frag_m*(item_ct1.get_local_id(1)/VKQ_ratio), stride_KV);
+                joint_matrix_load(sg, v_a, V_h_ptr + int64_t(k_VKQ_0 + k)*stride_KV + i_VKQ_0 + frag_m*(item_ct1.get_local_id(1)/VKQ_ratio), stride_KV);
 #pragma unroll
                 for (int j = 0; j < ncols/frag_n; ++j) {
-                    wmma::mma_sync(VKQ_c[i_VKQ_0/VKQ_stride][j], v_a, KQ_b[k0/(VKQ_ratio*16)][j], VKQ_c[i_VKQ_0/VKQ_stride][j]);
+                    // wmma::mma_sync(VKQ_c[i_VKQ_0/VKQ_stride][j], v_a, KQ_b[k0/(VKQ_ratio*16)][j], VKQ_c[i_VKQ_0/VKQ_stride][j]);
+                    joint_matrix_mad(sg, VKQ_c[i_VKQ_0/VKQ_stride][j], v_a, KQ_b[k0/(VKQ_ratio*16)][j], VKQ_c[i_VKQ_0/VKQ_stride][j]);
                 }
             }
         }
 
-        __syncthreads();
+        item_ct1.barrier(sycl::access::fence_space::local_space);
 
         const int offset_k = (item_ct1.get_local_id(1) % VKQ_ratio) * (ncols*D_padded);
 #pragma unroll
         for (int i_KQ_0 = 0; i_KQ_0 < D; i_KQ_0 += VKQ_stride) {
 #pragma unroll
             for (int j0 = 0; j0 < ncols; j0 += frag_n) {
-                wmma::store_matrix_sync(
-                    KQ + offset_k + j0*D_padded + i_KQ_0 + frag_m*(item_ct1.get_local_id(1)/VKQ_ratio),
+                // wmma::store_matrix_sync(
+                //     KQ + offset_k + j0*D_padded + i_KQ_0 + frag_m*(item_ct1.get_local_id(1)/VKQ_ratio),
+                //     VKQ_c[i_KQ_0/VKQ_stride][j0/frag_n],
+                //     D_padded, wmma::mem_col_major);s
+                joint_matrix_store(sg,
                     VKQ_c[i_KQ_0/VKQ_stride][j0/frag_n],
-                    D_padded, wmma::mem_col_major);
+                    KQ_c_ptr + offset_k + j0*D_padded + i_KQ_0 + frag_m*(item_ct1.get_local_id(1)/VKQ_ratio),
+                    D_padded, layout::row_major);
             }
         }
 
-        __syncthreads();
+        item_ct1.barrier(sycl::access::fence_space::local_space);
 
 #pragma unroll
         for (int j0 = 0; j0 < ncols; j0 += nwarps) {
@@ -412,13 +484,13 @@ static void flash_attn_ext_f16(const char* Q,
             }
         }
 
-        __syncthreads();
+        item_ct1.barrier(sycl::access::fence_space::local_space);
     }
 
     // Apply attention sinks
     if (sinksf && item_ct1.get_group(1) == 0) {
         const float sinkf = sinksf[head];
-        const half  sinkh = __float2half(sinkf);
+        const half  sinkh = sycl::half(sinkf);
 
 #pragma unroll
         for (int j0 = 0; j0 < ncols; j0 += nwarps) {
@@ -440,16 +512,16 @@ static void flash_attn_ext_f16(const char* Q,
                     VKQ2[j*(D_padded/2) + i] *= scale_h2;
                 }
             } else {
-                half kqmax_old = __low2half(KQ_max_h2[j0/nwarps]);
+                half kqmax_old = KQ_max_h2[j0/nwarps].x();
                 half kqmax_new = fmaxf(kqmax_old, sinkh);
-                KQ_max_h2[j0/nwarps] = __half2half2(kqmax_new);
+                KQ_max_h2[j0/nwarps] = sycl::half2(kqmax_new);
 
-                const half  KQ_max_scale_h = hexp(kqmax_old - kqmax_new);
-                const half2 KQ_max_scale   = __half2half2(KQ_max_scale_h);
+                const half  KQ_max_scale_h = sycl::exp(kqmax_old - kqmax_new);
+                const half2 KQ_max_scale   = sycl::half2(KQ_max_scale_h);
 
                 KQ_rowsum_h2[j0/nwarps] = KQ_rowsum_h2[j0/nwarps] * KQ_max_scale;
-                const half val = hexp(sinkh - kqmax_new);
-                KQ_rowsum_h2[j0/nwarps].x = __hadd(KQ_rowsum_h2[j0/nwarps].x, val);
+                const half val = sycl::exp(sinkh - kqmax_new);
+                KQ_rowsum_h2[j0/nwarps].x() = KQ_rowsum_h2[j0/nwarps].x()+val;
 
 #pragma unroll
                 for (int i0 = 0; i0 < D/2; i0 += warp_size) {
@@ -460,7 +532,7 @@ static void flash_attn_ext_f16(const char* Q,
             }
         }
 
-        __syncthreads();
+        item_ct1.barrier(sycl::access::fence_space::local_space);
     }
 #pragma unroll
     for (int j0 = 0; j0 < ncols; j0 += nwarps) {
@@ -473,7 +545,7 @@ static void flash_attn_ext_f16(const char* Q,
         if (std::is_same<KQ_acc_t, float>::value) {
             KQ_rowsum_j = KQ_rowsum_f[j0/nwarps];
         } else {
-            KQ_rowsum_j = __low2float(KQ_rowsum_h2[j0/nwarps]) + __high2float(KQ_rowsum_h2[j0/nwarps]);
+            KQ_rowsum_j = KQ_rowsum_h2[j0/nwarps].x() + KQ_rowsum_h2[j0/nwarps].y();
         }
 
         const int j_dst_unrolled = ((sequence*ne01 + ic0 + j_VKQ)*ne02 + head)*item_ct1.get_group_range(1) + item_ct1.get_group(1);
@@ -497,11 +569,11 @@ static void flash_attn_ext_f16(const char* Q,
 
         sycl::float2 dst_meta_val;
         if (std::is_same<KQ_acc_t, float>::value) {
-            dst_meta_val.x = KQ_max_f[j0/nwarps];
+            dst_meta_val.x() = KQ_max_f[j0/nwarps];
         } else {
-            dst_meta_val.x = __low2float(KQ_max_h2[j0/nwarps]);
+            dst_meta_val.x() = KQ_max_h2[j0/nwarps].x();
         }
-        dst_meta_val.y = KQ_rowsum_j;
+        dst_meta_val.y() = KQ_rowsum_j;
         dst_meta[j_dst_unrolled] = dst_meta_val;
     }
 #else
@@ -556,8 +628,9 @@ void ggml_sycl_flash_attn_ext_wmma_f16_case(ggml_backend_sycl_context & ctx, ggm
 
     constexpr int nwarps = 4;
 
-    constexpr int frag_m = cols_per_block == 8 && D % 32 == 0 ? 32 : 16;
-    const int warp_size = ggml_sycl_info().devices[ggml_sycl_get_device()].warp_size;
+    // constexpr int frag_m = cols_per_block == 8 && D % 32 == 0 ? 32 : 16;
+    constexpr int frag_m = 8;//arc 770,
+    const int warp_size = 8;// for Arc7, 16/32 for PVC WARP_32_SIZE;
 
     float logit_softcap;
     memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
@@ -568,8 +641,8 @@ void ggml_sycl_flash_attn_ext_wmma_f16_case(ggml_backend_sycl_context & ctx, ggm
       launch_fattn<D, cols_per_block, 1,
                    flash_attn_ext_f16<D, cols_per_block, nwarps,
                                       get_VKQ_stride(D, nwarps, frag_m),
-                                      KQ_acc_t, false>>(
-          ctx, dst, nwarps, 0, FATTN_KQ_STRIDE, true, true, false, warp_size);
+                                      KQ_acc_t, false>, warp_size>(
+          ctx, dst, nwarps, 0, FATTN_KQ_STRIDE, true, true, false);
 
     } else {
       constexpr bool use_logit_softcap = true;
@@ -577,8 +650,8 @@ void ggml_sycl_flash_attn_ext_wmma_f16_case(ggml_backend_sycl_context & ctx, ggm
       launch_fattn<D, cols_per_block, 1,
                    flash_attn_ext_f16<D, cols_per_block, nwarps,
                                       get_VKQ_stride(D, nwarps, frag_m),
-                                      KQ_acc_t, use_logit_softcap>>(
-          ctx, dst, nwarps, 0, FATTN_KQ_STRIDE, true, true, false, warp_size);
+                                      KQ_acc_t, use_logit_softcap>, warp_size>(
+          ctx, dst, nwarps, 0, FATTN_KQ_STRIDE, true, true, false);
     }
 }
 
@@ -587,7 +660,7 @@ void ggml_sycl_flash_attn_ext_wmma_f16(ggml_backend_sycl_context & ctx, ggml_ten
     const ggml_tensor * Q   = dst->src[0];
 
     const enum ggml_prec prec = ggml_flash_attn_ext_get_prec(KQV);
-    const int warp_size = ggml_sycl_info().devices[ctx.device].warp_size;
+    const int warp_size = WARP_32_SIZE;
 
     if (prec != GGML_PREC_DEFAULT) {
         if (Q->ne[1] <= 32 || Q->ne[0] > 128) {

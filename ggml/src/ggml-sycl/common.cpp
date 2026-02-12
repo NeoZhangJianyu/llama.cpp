@@ -81,3 +81,37 @@ void release_extra_gpu(ggml_tensor_extra_gpu * extra, std::vector<queue_ptr> str
     }
     delete extra;
 }
+
+
+void log_ggml_var_device(const char*name, float *src, size_t total_elements, dpct::queue_ptr main_stream,
+    bool src_on_device){
+    // if(!g_ggml_sycl_debug) return;
+    if(!src){
+        printf("GGML Tensor:%s skip to save for NULL pointer\n", name);
+        return;
+    }
+    char filename[1024];
+    sprintf(filename, "%s.txt", name);
+    printf("GGML Tensor:%s save to %s\n", name, filename);
+
+    size_t total_size = total_elements*sizeof(float);
+    float *local_buf = NULL;
+    if(src_on_device) {
+        local_buf = (float *) malloc(total_size);
+        main_stream->memcpy(local_buf, src, total_size).wait();
+    }
+    else {
+        local_buf = (float *)src;
+    }
+
+    std::ofstream logfile;
+    logfile.open(filename);
+    for(size_t i=0; i<total_elements; i++){
+        logfile << local_buf[i] <<" ";
+        if((i+1)%20 ==0) logfile <<std::endl;
+    }
+    logfile <<std::endl;
+    logfile.close();
+
+    if(src_on_device) free(local_buf);
+}

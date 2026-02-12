@@ -36,7 +36,8 @@ namespace syclexp = sycl::ext::oneapi::experimental;
 #define GGML_COMMON_DECL_SYCL
 #define GGML_COMMON_IMPL_SYCL
 #define FLASH_ATTN_AVAILABLE
-
+#define TURING_MMA_AVAILABLE
+#define GGML_SYCL_CC_AMPERE 0
 /* suppress warning spam */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wnested-anon-types"
@@ -449,13 +450,15 @@ warp_reduce_sum(sycl::float2 a, const sycl::nd_item<3>& item_ct1) {
     return a;
 }
 
-template <int width = WARP_SIZE>
+/* use WARP_SIZE or WARP_32_SIZE*/
+template <int width>
 static __dpct_inline__ int warp_reduce_sum(int x) {
   return sycl::reduce_over_group(
       sycl::ext::oneapi::this_work_item::get_sub_group(), x, sycl::plus<>());
 }
 
-template <int width = WARP_SIZE>
+/* use WARP_SIZE or WARP_32_SIZE*/
+template <int width>
 static __dpct_inline__ float warp_reduce_sum(float x) {
 #pragma unroll
   for (int offset = width / 2; offset > 0; offset >>= 1) {
@@ -465,7 +468,19 @@ static __dpct_inline__ float warp_reduce_sum(float x) {
   return x;
 }
 
-template <int width = WARP_SIZE>
+/* use WARP_SIZE or WARP_32_SIZE*/
+template <int width>
+static __dpct_inline__ float warp_reduce_sum(float x, const sycl::nd_item<3>& item_ct1) {
+#pragma unroll
+  for (int offset = width / 2; offset > 0; offset >>= 1) {
+    x += dpct::permute_sub_group_by_xor(
+        item_ct1.get_sub_group(), x, offset);
+  }
+  return x;
+}
+
+/* use WARP_SIZE or WARP_32_SIZE*/
+template <int width>
 static __dpct_inline__ sycl::float2 warp_reduce_sum(sycl::float2 a) {
 #pragma unroll
   for (int offset = width / 2; offset > 0; offset >>= 1) {
@@ -479,7 +494,8 @@ static __dpct_inline__ sycl::float2 warp_reduce_sum(sycl::float2 a) {
   return a;
 }
 
-template <int width = WARP_SIZE>
+/* use WARP_SIZE or WARP_32_SIZE*/
+template <int width>
 static __dpct_inline__ sycl::half2 warp_reduce_sum(sycl::half2 a) {
 #pragma unroll
   for (int offset = width / 2; offset > 0; offset >>= 1) {
@@ -495,7 +511,8 @@ static constexpr int ggml_sycl_get_physical_warp_size() {
   return WARP_SIZE;
 }
 
-template <int width = WARP_SIZE>
+/* use WARP_SIZE or WARP_32_SIZE*/
+template <int width>
 static __dpct_inline__ int warp_reduce_all(int x) {
     if (width == ggml_sycl_get_physical_warp_size()) {
         return sycl::all_of_group(
@@ -516,7 +533,8 @@ static __dpct_inline__ int warp_reduce_all(int x) {
     }
 }
 
-template <int width = WARP_SIZE>
+/* use WARP_SIZE or WARP_32_SIZE*/
+template <int width>
 static __dpct_inline__ int warp_reduce_any(int x) {
     if (width == ggml_sycl_get_physical_warp_size()) {
         return sycl::any_of_group(
@@ -537,7 +555,8 @@ static __dpct_inline__ int warp_reduce_any(int x) {
     }
 }
 
-template <int width = WARP_SIZE>
+/* use WARP_SIZE or WARP_32_SIZE*/
+template <int width>
 static __dpct_inline__ float warp_reduce_max(float x) {
 #pragma unroll
   for (int offset = width / 2; offset > 0; offset >>= 1) {
@@ -705,6 +724,7 @@ static bool cp_async_available(const int cc) {
 }
 
 // Maximum number of bytes that can be copied in a single instruction.
+// Set by test result.
 static constexpr int ggml_sycl_get_max_cpy_bytes() {
     return 16;
 }
@@ -827,5 +847,31 @@ sycl::kernel get_sycl_free_ker(sycl::queue& q) {
   sycl::kernel ker = exe_bndl.template ext_oneapi_get_kernel<kptr>();
   return ker;
 }
+
+static __dpct_inline__ sycl::half2 ggml_sycl_hmax2(const sycl::half2 a, const sycl::half2 b) {
+    sycl::half2 ret;
+    reinterpret_cast<sycl::half &>(ret.x()) =
+        sycl::vec<float, 1>(sycl::fmax(a[0], b[0])).convert<sycl::half, sycl::rounding_mode::automatic>()[0];
+    reinterpret_cast<sycl::half &>(ret.y()) =
+        sycl::vec<float, 1>(sycl::fmax(a[1], b[1])).convert<sycl::half, sycl::rounding_mode::automatic>()[0];
+    return ret;
+}
+
+static __dpct_inline__ sycl::half ggml_sycl_hmax(const sycl::half a, const sycl::half b) {
+    return sycl::vec<float, 1>(
+               sycl::fmax(sycl::vec<sycl::half, 1>(a).convert<float, sycl::rounding_mode::automatic>()[0],
+                          sycl::vec<sycl::half, 1>(b).convert<float, sycl::rounding_mode::automatic>()[0]))
+        .convert<sycl::half, sycl::rounding_mode::automatic>()[0];
+}
+
+static __dpct_inline__ uint32_t __hgt2_mask(const sycl::half2 a, const sycl::half2 b) {
+    const uint32_t mask_low  = 0x0000FFFF * (float(a[0]) > float(b[0]));
+    const uint32_t mask_high = 0xFFFF0000 * (float(a[1]) > float(b[1]));
+    return mask_low | mask_high;
+}
+
+
+void log_ggml_var_device(const char*name, float *src, size_t total_elements, dpct::queue_ptr main_stream,
+    bool src_on_device);
 
 #endif // GGML_SYCL_COMMON_HPP
