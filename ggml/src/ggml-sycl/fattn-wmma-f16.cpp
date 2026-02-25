@@ -33,6 +33,177 @@ namespace wmma = rocwmma;
 #endif // !defined(GGML_USE_HIP)
 #endif // GGML_USE_WMMA_FATTN
 
+void test_jm(queue_ptr q) {
+  dpct::dim3 group_range;
+  dpct::dim3 local_range;
+
+  group_range.x = 1;
+  group_range.y = 1;
+  group_range.z = 1;
+
+  local_range.x = 1;
+  local_range.y = 1;
+  local_range.z = 1;
+
+  q->submit([&](sycl::handler& cgh) {
+    auto out = sycl::stream{512, 512, cgh};
+    // local_accessor<half, 3> lsm{{16, 16, 16}, cgh};
+    // local_accessor<half, 1> lsm{{16*16*16}, cgh};
+    cgh.parallel_for(
+        sycl::nd_range<3>(
+            static_cast<sycl::range<3>>(group_range * local_range),
+            static_cast<sycl::range<3>>(local_range)),
+        [=](sycl::nd_item<3> item_ct1) [[sycl::reqd_sub_group_size(
+            32 /*warp_size zjy todo for more GPUs*/)]] {
+                int id=0;
+          constexpr int frag_m = 16;
+          constexpr int frag_n = 16;  // Arc, 16 - PVC
+          constexpr int frag_k = 16;
+
+          sycl::sub_group sg = item_ct1.get_sub_group();
+
+          if (id == 0)
+            out << "wmma id " << id << " frag_m=" << frag_m << " frag_n "<< frag_n << " frag_k="
+                <<  frag_k << sycl::endl;
+
+          if (id == 0)
+            out << "zjy sg sg.get_group_id()=" << sg.get_group_id()[0] <<
+            " sg.get_local_id()="<< sg.get_local_id()[0] <<
+            " sg.get_local_range() =" << sg.get_local_range()[0] << sycl::endl;
+
+          constexpr size_t local_share_mem_size = (16*16*16) * sizeof(half);
+
+          syclex::work_group_static<char[local_share_mem_size]> lsm;
+
+          half* KQ = (half*)&lsm;
+          // half *VKQ = KQ + lsm_size1;
+
+        //   auto A_ptr =
+        //       lsm.template get_multi_ptr<sycl::access::decorated::yes>();
+
+              //   joint_matrix<sub_group, half, use::a, 8, 16, layout::row_major> a1;
+        //   joint_matrix_load(sg, a1, A_ptr, 16);
+
+          auto A_ptr = address_space_cast<
+              sycl::access::address_space::local_space,
+              sycl::access::decorated::no>(KQ);
+
+        // auto pC = address_space_cast<sycl::access::address_space::global_space,
+        //                      sycl::access::decorated::no>(memC);
+
+
+          if (id == 0)
+            sycl::ext::oneapi::experimental::printf(
+                "wmma id %d 4 KQ=%p A_ptr=%p\n", id, KQ, A_ptr);
+
+          joint_matrix<sub_group, half, use::a, 16, 16, layout::row_major> a1;
+          // return;
+          joint_matrix_load(sg, a1, A_ptr, 16);
+        });
+  });
+
+  return;
+}
+template <int D,
+          int ncols,
+          int nwarps,
+          int VKQ_stride,
+          typename KQ_acc_t,
+          bool use_logit_softcap>
+// SYCL_EXT_ONEAPI_FUNCTION_PROPERTY((syclexp::nd_range_kernel<3>))
+static void flash_attn_ext_f161(const char* Q,
+                               const char* K,
+                               const char* V,
+                               const char* mask,
+                               const char* sinks,
+                               const int* KV_max,
+                               float* dst,
+                               sycl::float2* dst_meta,
+                               const float scale,
+                               const float max_bias,
+                               const float m0,
+                               const float m1,
+                               const uint32_t n_head_log2,
+                               const float logit_softcap,
+                               const int32_t ne00,
+                               const int32_t ne01,
+                               const int32_t ne02,
+                               const int32_t ne03,
+                               const int32_t nb01,
+                               const int32_t nb02,
+                               const int32_t nb03,
+                               const int32_t ne10,
+                               const int32_t ne11,
+                               const int32_t ne12,
+                               const int32_t ne13,
+                               const int32_t nb11,
+                               const int32_t nb12,
+                               const int64_t nb13,
+                               const int32_t nb21,
+                               const int32_t nb22,
+                               const int64_t nb23,
+                               const int32_t ne31,
+                               const int32_t ne32,
+                               const int32_t ne33,
+                               const int32_t nb31,
+                               const int32_t nb32,
+                               const int64_t nb33,
+                               const sycl::nd_item<3>& item_ct1,
+                               const sycl::stream & out,
+                               uint8_t* unused_lsm) {
+  // auto item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+ int blockId = item_ct1.get_group(2) + item_ct1.get_group(1) * item_ct1.get_group_range(2) + item_ct1.get_group(0) * item_ct1.get_group_range(2) * item_ct1.get_group_range(1);
+ int threadsPerBlock = item_ct1.get_local_range(2) * item_ct1.get_local_range(1) * item_ct1.get_local_range(0);
+ int threadInBlockId = item_ct1.get_local_id(2) + item_ct1.get_local_id(1) * item_ct1.get_local_range(2) + item_ct1.get_local_id(0) * item_ct1.get_local_range(2) * item_ct1.get_local_range(1);
+ int id = blockId * threadsPerBlock + threadInBlockId;
+ if(id==0) sycl::ext::oneapi::experimental::printf("flash_attn_ext_f16 entry id=%d\n", id);
+
+
+    if(id==0) sycl::ext::oneapi::experimental::printf("flash_attn_ext_f16 id=%d 1\n", id);
+
+
+
+    constexpr int warp_size = WARP_32_SIZE;
+
+    constexpr int frag_m = 16;
+    constexpr int frag_n = 16; //Arc, 16 - PVC
+    constexpr int frag_k = 16;
+
+    sycl::sub_group sg = item_ct1.get_sub_group();
+
+    if(id==0) sycl::ext::oneapi::experimental::printf("wmma id %d frag_m=%d frag_n=%d frag_k=%d\n",
+        id, frag_m,frag_n,frag_k);
+
+
+    if(id==0)  sycl::ext::oneapi::experimental::printf(
+                "zjy sg sg.get_group_id()=%d sg.get_local_id()=%d "
+                "sg.get_local_range() = %d\n",
+                sg.get_group_id()[0], sg.get_local_id()[0],
+                sg.get_local_range()[0]);
+
+
+    constexpr size_t local_share_mem_size = (5000)*sizeof(half);
+
+
+    syclex::work_group_static<char[local_share_mem_size]> lsm;
+
+    half *KQ = (half*) &lsm;
+    // half *VKQ = KQ + lsm_size1;
+
+
+    auto A_ptr = address_space_cast<
+                 sycl::access::address_space::global_space,
+                 sycl::access::decorated::no>(KQ);
+    if(id==0) sycl::ext::oneapi::experimental::printf("wmma id %d 4 KQ=%p A_ptr=%p\n",
+        id, KQ, A_ptr);
+
+    joint_matrix<sub_group, half, use::a, 16, 16, layout::row_major>  a1;
+    // return;
+    joint_matrix_load(sg, a1, A_ptr, 16);
+
+    return;
+}
+
 // D == head size, VKQ_stride == num VKQ rows calculated in parallel:
 template <int D,
           int ncols,
@@ -96,7 +267,8 @@ static void flash_attn_ext_f16(const char* Q,
         return;
     }
 
-    if(id==0) sycl::ext::oneapi::experimental::printf("flash_attn_ext_f16 entry id %d\n", id);
+    if(id==0) sycl::ext::oneapi::experimental::printf("flash_attn_ext_f16 entry id %d 2\n", id);
+
 
     //In this kernel Q, K, V are matrices while i, j, k are matrix indices.
 
@@ -108,8 +280,8 @@ static void flash_attn_ext_f16(const char* Q,
     static_assert(ncols == 8 || ncols % 16 == 0, "ncols must be 8 or a multiple of 16.");
     // constexpr int frag_m = ncols == 8 ? 32 : 16;
     // constexpr int frag_n = ncols == 8 ?  8 : 16;
-    constexpr int frag_m = 8;
-    constexpr int frag_n = 8; //Arc, 16 - PVC
+    constexpr int frag_m = 16;
+    constexpr int frag_n = ncols == 8 ?  8 : 16; //Arc, 16 - PVC
     constexpr int frag_k = 16;
     static_assert(D % frag_m == 0, "If ncols == 8 then D % frag_m must be 0.");
     // typedef wmma::fragment<wmma::matrix_a,    frag_m, frag_n, 16, half, wmma::row_major> frag_a_K;
@@ -123,7 +295,26 @@ static void flash_attn_ext_f16(const char* Q,
     typedef joint_matrix<sycl::sub_group, half, use::a, frag_m, frag_k, layout::row_major> frag_a_V;
     typedef joint_matrix<sycl::sub_group, half, use::b, frag_k, frag_n, layout::row_major> frag_b;
     typedef joint_matrix<sycl::sub_group, KQ_acc_t, use::accumulator, frag_m, frag_n> frag_c_KQ;
-    typedef joint_matrix<sycl::sub_group, KQ_acc_t, use::accumulator, frag_m, frag_n> frag_c_VKQ;
+    typedef joint_matrix<sycl::sub_group, half, use::accumulator, frag_m, frag_n> frag_c_VKQ;
+
+    // if(id==0) sycl::ext::oneapi::experimental::printf("wmma id %d frag_m=%d frag_n=%d frag_k=%d\n",
+    //     id, frag_m,frag_n,frag_k);
+
+
+    // if(id==0)  sycl::ext::oneapi::experimental::printf(
+    //             "zjy sg sg.get_group_id()=%d sg.get_local_id()=%d "
+    //             "sg.get_local_range() = %d\n",
+    //             sg.get_group_id()[0], sg.get_local_id()[0],
+    //             sg.get_local_range()[0]);
+
+    if (id == 0)
+      out << "wmma1 id " << id << " frag_m=" << frag_m << " frag_n " << frag_n
+          << " frag_k=" << frag_k << sycl::endl;
+
+    if (id == 0)
+      out << "zjy sg sg.get_group_id()=" << sg.get_group_id()[0]
+          << " sg.get_local_id()=" << sg.get_local_id()[0]
+          << " sg.get_local_range() =" << sg.get_local_range()[0] << sycl::endl;
 
     constexpr int KQ_stride_tc  = nwarps*frag_m; // Number of KQ rows calculated in parallel.
     constexpr int VKQ_ratio = KQ_stride_tc/VKQ_stride; // Number of parallel VKQ accumulators needed to keep all warps busy.
@@ -139,10 +330,22 @@ static void flash_attn_ext_f16(const char* Q,
     const int gqa_ratio = ne02 / ne12; // With grouped query attention there are > 1 Q matrices per K, V matrix.
     const float * Q_f    = (const float *) (Q    + nb03* sequence         + nb02* head              + nb01*ic0);
     const half  * K_h    = (const half  *) (K    + nb13* sequence         + nb12*(head / gqa_ratio));
+    if(id==0) sycl::ext::oneapi::experimental::printf("wmma id %d K_h offset=%d v=%f\n",
+        id, nb13* sequence  + nb12*(head / gqa_ratio), K_h[0]);
+    if(id==0) {
+        // out << "offset=" << nb13<< " "<<  sequence<< " "
+        //     <<  nb12<< " "<<  head<< " "<<  gqa_ratio<< " "<<  ne02<< " "<<  ne12<<sycl::endl;
+        out << "offset="
+            <<  nb12<< " "<<  ne02<< " "
+            <<  nb13* sequence + nb12*(head / gqa_ratio)<< " "
+            <<sycl::endl;
+    }
+
     const half  * V_h    = (const half  *) (V    + nb13* sequence         + nb12*(head / gqa_ratio)); // K and V have same shape
     const half  * maskh  = (const half  *) (mask + nb33*(sequence % ne33)                           + nb31*ic0);
     const half2 * mask2  = (const half2 *)  maskh;
     const float * sinksf = (const float *) sinks;
+
 
     const int stride_Q  = nb01 / sizeof(float);
     const int stride_KV = nb11 / sizeof(half);
@@ -153,41 +356,66 @@ static void flash_attn_ext_f16(const char* Q,
 
     const half2 logit_softcap_2 = make_half2(logit_softcap, logit_softcap);
 
-    frag_b Q_b[D/16][ncols/frag_n];
-
     // A single buffer for temporarily holding tiles of KQ and VKQ parts:
     constexpr int mem_KQ = ncols*kqs_padded*kqar;
     constexpr int mem_VKQ_parts = VKQ_ratio*ncols*D_padded;
+
+    if(id==0) sycl::ext::oneapi::experimental::printf("wmma id %d 4 Q_b[%d][%d] KQ size=%d scale=%f\n",
+        id, D/16, ncols/frag_n, mem_KQ >= mem_VKQ_parts ? mem_KQ : mem_VKQ_parts, scale);
+
     // __shared__ half KQ[mem_KQ >= mem_VKQ_parts ? mem_KQ : mem_VKQ_parts];
     // __shared__ half VKQ[ncols*D_padded]; // Accumulator for final VKQ slice.
     constexpr size_t lsm_size1 = mem_KQ >= mem_VKQ_parts ? mem_KQ : mem_VKQ_parts;
     constexpr size_t lsm_size2 = ncols*D_padded;
     constexpr size_t local_share_mem_size = (lsm_size1+lsm_size2)*sizeof(half);
+
+    // if(id==0) sycl::ext::oneapi::experimental::printf("wmma1 id %d 4 Q_b[%d][%d] KQ size=%d\n",
+    //     id, D/16, ncols/frag_n, lsm_size1);
+
     syclex::work_group_static<char[local_share_mem_size]> lsm;
 
     half *KQ = (half*) &lsm;
     half *VKQ = KQ + lsm_size1;
 
+    // auto A_ptr = KQ;
+    // auto A_ptr = sycl::multi_ptr<sycl::half, sycl::access::address_space::local_space>(KQ);
+
+    // auto A_ptr = address_space_cast<
+    //              sycl::access::address_space::global_space,
+    //              sycl::access::decorated::yes>(KQ);
+    // if(id==0) sycl::ext::oneapi::experimental::printf("wmma id %d 4 KQ=%p A_ptr=%p\n",
+        // id, KQ, A_ptr);
+
+    //  if (id == 0)
+    //   out << "wmma id " << id << " KQ=" << KQ << " A_ptr " << A_ptr << sycl::endl;
+
+    // joint_matrix<sub_group, half, use::a, 8, 16, layout::row_major>  a1;
+    // joint_matrix_load(sg, a1, A_ptr, 16);
+
+    // return;
+
+    frag_b Q_b[D/16][ncols/frag_n];
+
     auto KQ_ptr = address_space_cast<
-        sycl::access::address_space::global_space,
-        sycl::access::decorated::yes>(KQ);
+        sycl::access::address_space::local_space,
+        sycl::access::decorated::no>(KQ);
 
     auto KQ_c_ptr = address_space_cast<
-        sycl::access::address_space::global_space,
-        sycl::access::decorated::yes>((KQ_acc_t*)KQ);
+        sycl::access::address_space::local_space,
+        sycl::access::decorated::no>((KQ_acc_t*)KQ);
 
     auto K_h_ptr = address_space_cast<
-        sycl::access::address_space::global_space,
-        sycl::access::decorated::yes>(K_h);
+        sycl::access::address_space::local_space,
+        sycl::access::decorated::no>(K_h);
 
     auto V_h_ptr = address_space_cast<
-        sycl::access::address_space::global_space,
-        sycl::access::decorated::yes>(V_h);
+        sycl::access::address_space::local_space,
+        sycl::access::decorated::no>(V_h);
     // auto B_ptr = address_space_cast<
-    //     sycl::access::address_space::global_space,
+    //     sycl::access::address_space::local_space,
     //     sycl::access::decorated::yes>(B);
     // auto C_ptr = address_space_cast<
-    //     sycl::access::address_space::global_space,
+    //     sycl::access::address_space::local_space,
     //     sycl::access::decorated::yes>(C);
 
     float * KQ_f = (float *) KQ;
@@ -236,10 +464,33 @@ static void flash_attn_ext_f16(const char* Q,
                 break;
             }
             KQ[j*D_padded + i] = ic0 + j < ne01 ? Q_f[j*stride_Q + i] * scale : 0.0f;
+            if(id==0 && (ic0 + j < ne01)) {
+                // sycl::ext::oneapi::experimental::printf("wmma id %d KQ[%d]=%f %f\n",
+                //     id, j*D_padded + i, KQ[j*D_padded + i], Q_f[j*stride_Q + i] * scale);
+                out << "wmma id "<< id << " KQ["<<j*D_padded + i<<"]="<< KQ[j*D_padded + i] << " "
+                <<  Q_f[j*stride_Q + i] * scale << sycl::endl;
+                // sycl::ext::oneapi::experimental::printf("wmma id %d Q_f[%d]=%f scale=%f res=%f\n", id, j*stride_Q + i,
+                //     Q_f[j*stride_Q + i], scale, Q_f[j*stride_Q + i] * scale);
+
+            }
+            // if( ic0 + j < ne01) {
+            //     sycl::ext::oneapi::experimental::printf("wmma id %d KQ=%f %f %f\n", id,
+            //         Q_f[j*stride_Q + i], scale, Q_f[j*stride_Q + i] * scale);
+            // }
         }
     }
 
     item_ct1.barrier(sycl::access::fence_space::local_space);
+    if(id==0) {
+        sycl::ext::oneapi::experimental::printf("wmma id %d KQ=\n", id);
+
+        // for(int p=0;p<8448;p++) {
+        //         sycl::ext::oneapi::experimental::printf("%f-%f",KQ[p], K_h[p]);
+
+        //         if(p+1 % 20==0) sycl::ext::oneapi::experimental::printf("\n");
+        //     }
+        // sycl::ext::oneapi::experimental::printf("\n");
+    }
 
     // Load Q into tensor core fragments/registers since it will be used frequently:
 #pragma unroll
@@ -247,11 +498,30 @@ static void flash_attn_ext_f16(const char* Q,
 #pragma unroll
         for (int j0 = 0; j0 < ncols; j0 += frag_n) {
             // wmma::load_matrix_sync(Q_b[i0/16][j0/frag_n], KQ_ptr + j0*D_padded + i0, D_padded);
+            // if(id==0) sycl::ext::oneapi::experimental::printf("wmma id %d Q_b[%d][%d] offset=%d pad=%d\n",
+            //         id, i0/16,j0/frag_n,  j0*D_padded + i0, D_padded);
+            // return;
+            // frag_b b1;
+            // joint_matrix<sub_group, half, use::b, 16, 16, layout::row_major>  b1;
+            // // return;
+            // joint_matrix_load(sg, b1, A_ptr, 16);
             joint_matrix_load(sg, Q_b[i0/16][j0/frag_n], KQ_ptr + j0*D_padded + i0, D_padded);
+            if(id==0) {
+                // sycl::ext::oneapi::experimental::printf("wmma id %d KQ[%d]=%f\n",
+                // id, j0*D_padded + i0, *(KQ_ptr + j0*D_padded + i0));
+                out << "wmma id "<< id << " KQ["<<j0*D_padded + i0<<"]="<< *(KQ_ptr + j0*D_padded + i0) << " "
+                <<  KQ_ptr[j0*D_padded + i0] << sycl::endl;
+
+            }
+             // return;
         }
     }
 
+
+
     item_ct1.barrier(sycl::access::fence_space::local_space);
+
+
 
     // Iterate over ne11 == previous tokens:
     const int k_VKQ_max = KV_max ? KV_max[sequence * item_ct1.get_group_range(2) + item_ct1.get_group(2)] : ne11;
@@ -265,11 +535,36 @@ static void flash_attn_ext_f16(const char* Q,
                 // wmma::fill_fragment(KQ_c[j], static_cast<KQ_acc_t>(0.0f));
                 joint_matrix_fill(sg, KQ_c[j], 0);
             }
+            const int warp_adjust = warp_size/16;
 #pragma unroll
             for (int k_KQ_0 = 0; k_KQ_0 < D; k_KQ_0 += 16) {
                 frag_a_K K_a;
+                const int local_id = item_ct1.get_local_id(1)/warp_adjust;
                 // wmma::load_matrix_sync(K_a, K_h + int64_t(k_VKQ_0 + i_KQ_0 + frag_m*item_ct1.get_local_id(1))*stride_KV + k_KQ_0, stride_KV);
-                joint_matrix_load(sg, K_a, K_h_ptr + int64_t(k_VKQ_0 + i_KQ_0 + frag_m*item_ct1.get_local_id(1))*stride_KV + k_KQ_0, stride_KV);
+                joint_matrix_load(sg, K_a, K_h_ptr + int64_t(k_VKQ_0 + i_KQ_0 + frag_m*local_id)*stride_KV + k_KQ_0, stride_KV);
+                if(id==0) {
+                    // sycl::ext::oneapi::experimental::printf("wmma id %d k_KQ_0=%d K_h[%d]=%f\n",
+                    // id, k_KQ_0, int64_t(k_VKQ_0 + i_KQ_0 + frag_m*local_id)*stride_KV + k_KQ_0,
+                    // *(K_h_ptr + int64_t(k_VKQ_0 + i_KQ_0 + frag_m*local_id)*stride_KV + k_KQ_0));
+                    out << "wmma id "<< id << " k_KQ_0="<<k_KQ_0 <<" K_h["<< int64_t(k_VKQ_0 + i_KQ_0 + frag_m*local_id)*stride_KV + k_KQ_0 << "]="
+                    <<  *(K_h_ptr + int64_t(k_VKQ_0 + i_KQ_0 + frag_m*local_id)*stride_KV + k_KQ_0) << sycl::endl;
+                    // for(int p=0;p<256;p++) {
+                    //     sycl::ext::oneapi::experimental::printf("%f ",*(K_h+p));
+                    //     if(p+1 % 20==0) sycl::ext::oneapi::experimental::printf("\n");
+                    // }
+                    // sycl::ext::oneapi::experimental::printf("\n");
+                    out << "K_h= ";
+                    for(int p=0;p<32;p++) {
+                        out << *(K_h+p) << " "<<*(K_h_ptr+p) <<" ";
+                        if(p+1 % 20==0) out << sycl::endl;
+                    }
+                    out << sycl::endl;
+
+                    // sycl::ext::oneapi::experimental::printf("wmma id %d idx=%d %d %d %d %d %d\n",
+                    // id,
+                    // k_VKQ_0, i_KQ_0, frag_m, local_id, stride_KV, k_KQ_0);
+                }
+
 #pragma unroll
                 for (int j = 0; j < ncols/frag_n; ++j) {
                     // wmma::mma_sync(KQ_c[j], K_a, Q_b[k_KQ_0/16][j], KQ_c[j]);
@@ -282,6 +577,9 @@ static void flash_attn_ext_f16(const char* Q,
                 joint_matrix_store(sg, KQ_c[j0/frag_n],
                     KQ_c_ptr + j0*kqs_padded + i_KQ_0 + frag_m*item_ct1.get_local_id(1), kqs_padded,
                     layout::row_major);
+                if(id==0) sycl::ext::oneapi::experimental::printf("wmma id %d KQ_c[%d]=%f\n",
+                  id, j0*kqs_padded + i_KQ_0 + frag_m*item_ct1.get_local_id(1),
+                  *(KQ_c_ptr + j0*kqs_padded + i_KQ_0 + frag_m*item_ct1.get_local_id(1)));
             }
         }
 
@@ -300,6 +598,8 @@ static void flash_attn_ext_f16(const char* Q,
                     const int k = k0 + item_ct1.get_local_id(2);
 
                     KQ_f_tmp[k0/warp_size] = KQ_f[j*kqs_padded + k];
+                    if(id==0) sycl::ext::oneapi::experimental::printf(
+                        "wmma id %d KQ_f[%d]=%f\n", id, j*kqs_padded + k, KQ_f[j*kqs_padded + k]);
 
                     if (use_logit_softcap) {
                         KQ_f_tmp[k0/warp_size] = logit_softcap*tanhf(KQ_f_tmp[k0/warp_size]);
@@ -450,7 +750,7 @@ static void flash_attn_ext_f16(const char* Q,
                 //     D_padded, wmma::mem_col_major);s
                 joint_matrix_store(sg,
                     VKQ_c[i_KQ_0/VKQ_stride][j0/frag_n],
-                    KQ_c_ptr + offset_k + j0*D_padded + i_KQ_0 + frag_m*(item_ct1.get_local_id(1)/VKQ_ratio),
+                    KQ_ptr + offset_k + j0*D_padded + i_KQ_0 + frag_m*(item_ct1.get_local_id(1)/VKQ_ratio),
                     D_padded, layout::row_major);
             }
         }
@@ -624,16 +924,41 @@ static_assert(get_VKQ_stride( 80, 4, 16) ==  16, "Test failed.");
 
 template <int D, int cols_per_block, typename KQ_acc_t>
 void ggml_sycl_flash_attn_ext_wmma_f16_case(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
+    // test_jm(ctx.stream());
+    // return;
+
     const ggml_tensor * KQV = dst;
 
     constexpr int nwarps = 4;
 
     // constexpr int frag_m = cols_per_block == 8 && D % 32 == 0 ? 32 : 16;
-    constexpr int frag_m = 8;//arc 770,
-    const int warp_size = 8;// for Arc7, 16/32 for PVC WARP_32_SIZE;
+    constexpr int frag_m = 16;//pvc arc 770,
+    const int warp_size = 16;// for Arc7, 16/32 for PVC WARP_32_SIZE;
 
     float logit_softcap;
     memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
+
+    constexpr int KQ_stride_tc =
+        nwarps * frag_m;  // Number of KQ rows calculated in parallel.
+    constexpr int VKQ_stride = get_VKQ_stride(D, nwarps, frag_m);
+    constexpr int VKQ_ratio =
+        KQ_stride_tc / VKQ_stride;  // Number of parallel VKQ accumulators
+                                    // needed to keep all warps busy.
+    static_assert(VKQ_ratio <= nwarps, "VKQ_ratio must be <= nwarps.");
+
+    // Pad internal representation of KQ, KQV to reduce shared memory bank
+    // conflicts:
+    constexpr int D_padded = D + 8;
+    constexpr int kqs_padded = FATTN_KQ_STRIDE + 8;
+    constexpr int kqar = sizeof(KQ_acc_t) / sizeof(half);
+
+    constexpr int mem_KQ = cols_per_block * kqs_padded * kqar;
+    constexpr int mem_VKQ_parts = VKQ_ratio * cols_per_block * D_padded;
+    constexpr size_t lsm_size1 =
+        mem_KQ >= mem_VKQ_parts ? mem_KQ : mem_VKQ_parts;
+    constexpr size_t lsm_size2 = cols_per_block * D_padded;
+    constexpr size_t local_share_mem_size =
+        (lsm_size1 + lsm_size2) * sizeof(half);
 
     // fattn_kernel_t fattn_kernel;
     if (logit_softcap == 0.0f) {
